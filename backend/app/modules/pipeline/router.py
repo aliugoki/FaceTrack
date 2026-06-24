@@ -1,30 +1,30 @@
-"""Pipeline provisioning — generate a company's DeepStream config + launch command.
+"""Pipeline control panel API — provisioning + live ops (status/health/lifecycle).
 
-Safe by design: the dashboard only *generates* the config text (it owns the
-camera data) and shows the operator the command to run. It does NOT execute
-docker (no docker-socket access from the web app).
+Safe by design: the dashboard NEVER runs docker. It (a) generates config text it
+owns the data for, (b) reads live health straight off each pipeline's /healthz
+(host networking), and (c) enqueues bounded start/stop/restart jobs that the
+token-holding host agent executes and reports back on (plus a GPU/container
+heartbeat). See service.py for the status/health logic.
 """
 import datetime
 
 from fastapi import APIRouter, Depends, Query, HTTPException
 from pydantic import BaseModel
 
-from app.core.config import settings
 from app.core.db import database, cameras, companies, pipeline_jobs
 from app.core.deps import Principal, require
 from app.modules.audit import service as audit
+from app.modules.pipeline import service
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
+
+ACTIONS = ("start", "stop", "restart")
 
 
 class LaunchIn(BaseModel):
     company: str            # target company admin_username
-    action: str = "start"   # start | stop
+    action: str = "start"   # start | stop | restart
     index: int = 0
-
-
-def _agent_ok(token: str) -> bool:
-    return bool(settings.AGENT_TOKEN) and token == settings.AGENT_TOKEN
 
 
 def _toml(company_name, admin_username, cams, index):
@@ -77,6 +77,32 @@ async def _resolve_company(admin_username: str):
     return row
 
 
+# --------------------------------------------------------------------------- #
+# Live ops — status / health / agent (super-admin reads)
+# --------------------------------------------------------------------------- #
+@router.get("/status")
+async def status(p: Principal = Depends(require("manage_tenants"))):
+    """Whole-fleet status: per-company state + agent/GPU summary."""
+    return await service.fleet_status()
+
+
+@router.get("/health/{index}")
+async def health(index: int, p: Principal = Depends(require("manage_tenants"))):
+    """Detailed live health for one pipeline (per-source frame flow)."""
+    if index < 0 or index > 50:
+        raise HTTPException(400, "index out of range")
+    return await service.fetch_health(index)
+
+
+@router.get("/agent")
+async def agent(p: Principal = Depends(require("manage_tenants"))):
+    """Host-agent heartbeat: online?, GPU telemetry, container list."""
+    return await service.agent_state()
+
+
+# --------------------------------------------------------------------------- #
+# Provisioning — generate config + command (super-admin)
+# --------------------------------------------------------------------------- #
 @router.get("/provision")
 async def provision(company: str = Query(..., description="target company admin_username"),
                     index: int = Query(0, ge=0, le=50),
@@ -88,22 +114,24 @@ async def provision(company: str = Query(..., description="target company admin_
                                & (cameras.c.rtsp_url.isnot(None)) & (cameras.c.rtsp_url != ""))
         .order_by(cameras.c.name))
     cam_list = [{"name": c["name"], "type": c["type"], "rtsp_url": c["rtsp_url"]} for c in cams]
-    config, rtsp, health = _toml(row["company_name"], company, cam_list, index)
+    config, rtsp, hport = _toml(row["company_name"], company, cam_list, index)
     return {
         "company": row["company_name"], "admin_username": company,
         "camera_count": len(cam_list), "index": index,
-        "rtsp_port": rtsp, "health_port": health,
+        "rtsp_port": rtsp, "health_port": hport,
         "config_filename": f"{company}.toml",
         "config": config,
         "launch_command": f"./tools/run_company_pipeline.sh {company} {index}",
     }
 
 
-# ---- UI-driven launch via the host agent (web app never touches docker) ----
+# --------------------------------------------------------------------------- #
+# Lifecycle — enqueue start/stop/restart for the host agent (super-admin)
+# --------------------------------------------------------------------------- #
 @router.post("/launch")
 async def launch(body: LaunchIn, p: Principal = Depends(require("manage_tenants"))):
-    if body.action not in ("start", "stop"):
-        raise HTTPException(400, "action must be start|stop")
+    if body.action not in ACTIONS:
+        raise HTTPException(400, f"action must be one of {ACTIONS}")
     row = await _resolve_company(body.company)
     now = datetime.datetime.now()
     jid = await database.execute(pipeline_jobs.insert().values(
@@ -124,9 +152,17 @@ async def jobs(p: Principal = Depends(require("manage_tenants"))):
             for r in rows]
 
 
+# --------------------------------------------------------------------------- #
+# Host-agent endpoints — token-authed, NOT user endpoints
+# --------------------------------------------------------------------------- #
+def _agent_ok(token: str) -> bool:
+    from app.core.config import settings
+    return bool(settings.AGENT_TOKEN) and token == settings.AGENT_TOKEN
+
+
 @router.get("/agent/jobs")
 async def agent_jobs(token: str = ""):
-    """Host agent polls pending jobs (token-authed; not a user endpoint)."""
+    """Host agent polls pending jobs."""
     if not _agent_ok(token):
         raise HTTPException(403, "invalid agent token")
     rows = await database.fetch_all(
@@ -147,4 +183,19 @@ async def agent_update(jid: int, body: AgentUpdate):
     await database.execute(pipeline_jobs.update().where(pipeline_jobs.c.id == jid)
                            .values(status=body.status, log=(body.log or "")[:2000],
                                    updated_at=datetime.datetime.now()))
+    return {"status": "ok"}
+
+
+class Heartbeat(BaseModel):
+    token: str
+    containers: list = []
+    gpus: list = []
+
+
+@router.post("/agent/heartbeat")
+async def agent_heartbeat(body: Heartbeat):
+    """Host agent pushes container + GPU telemetry (every few seconds)."""
+    if not _agent_ok(body.token):
+        raise HTTPException(403, "invalid agent token")
+    await service.save_heartbeat(body.containers, body.gpus)
     return {"status": "ok"}

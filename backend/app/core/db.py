@@ -137,6 +137,16 @@ cameras = Table(
     Column("created_at", DateTime, default=datetime.datetime.now),
 )
 
+# Latest heartbeat from the host-side pipeline agent (single row, id=1): a JSON
+# snapshot of deepstream-* containers + GPU telemetry. Lets the control panel
+# show container state/logs/GPU though the web app never touches docker itself.
+pipeline_agent_state = Table(
+    "pipeline_agent_state", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("payload", String),
+    Column("updated_at", DateTime, default=datetime.datetime.now),
+)
+
 
 async def connect_and_init():
     await database.connect()
@@ -165,6 +175,8 @@ async def connect_and_init():
         id SERIAL PRIMARY KEY, company_id TEXT, name TEXT NOT NULL, location TEXT,
         type TEXT DEFAULT 'entrance', rtsp_url TEXT, hls_url TEXT, webrtc_url TEXT,
         enabled BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT now())""")
+    await database.execute("""CREATE TABLE IF NOT EXISTS pipeline_agent_state (
+        id INTEGER PRIMARY KEY, payload TEXT, updated_at TIMESTAMP DEFAULT now())""")
 
 
 async def disconnect():
