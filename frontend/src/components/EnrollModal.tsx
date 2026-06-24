@@ -11,7 +11,8 @@ export default function EnrollModal({ onClose, onDone }: { onClose: () => void; 
   const [img, setImg] = useState('')
   const [busy, setBusy] = useState(false)
   const [camOn, setCamOn] = useState(false)
-  const [status, setStatus] = useState({ text: 'Starting camera…', ok: false })
+  const [status, setStatus] = useState<{ text: string; ok: boolean; checks: { label: string; pass: boolean }[] }>(
+    { text: 'Starting camera…', ok: false, checks: [] })
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -40,37 +41,66 @@ export default function EnrollModal({ onClose, onDone }: { onClose: () => void; 
 
   const startCam = async () => {
     setImg(''); capturedRef.current = false; alignedRef.current = 0
+    // getUserMedia exists only in a secure context (HTTPS or localhost). Over a
+    // plain-HTTP LAN origin navigator.mediaDevices is undefined → give a precise hint.
+    if (!navigator.mediaDevices?.getUserMedia) {
+      toast(window.isSecureContext
+        ? 'Camera API unavailable in this browser — use Upload instead'
+        : 'Camera blocked: open this page over HTTPS (or via localhost). Use Upload for now.', 'err')
+      return
+    }
     try {
       const s = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' } })
       streamRef.current = s; setCamOn(true)
       const v = videoRef.current!; v.srcObject = s; await v.play()
       let det: FaceDetector | null = null
-      try { det = await ensureDetector() } catch { setStatus({ text: 'Live guide unavailable — capture manually', ok: false }) }
+      try { det = await ensureDetector() } catch { setStatus({ text: 'Live guide unavailable — capture manually', ok: false, checks: [] }) }
       loop(det)
-    } catch { toast('Camera unavailable — use Upload instead', 'err') }
+    } catch (err: any) {
+      const name = err?.name
+      toast(name === 'NotAllowedError' ? 'Camera permission denied — allow it in the browser and retry'
+        : name === 'NotFoundError' ? 'No camera found on this device — use Upload instead'
+        : `Camera unavailable (${name || 'error'}) — use Upload instead`, 'err')
+    }
   }
 
-  // Alignment evaluation in normalized [0,1] frame coords
+  // Alignment evaluation in normalized [0,1] frame coords → checklist + first action to fix
   const evaluate = (d: any) => {
+    if (!d) return { ok: false, text: 'No face detected — look at the camera', checks: [{ label: 'Face detected', pass: false }] }
     const bb = d.boundingBox, k = d.keypoints
     const vw = videoRef.current!.videoWidth, vh = videoRef.current!.videoHeight
     const cx = (bb.originX + bb.width / 2) / vw, cy = (bb.originY + bb.height / 2) / vh
     const bw = bb.width / vw
-    if (bw < 0.30) return { ok: false, msg: 'Move closer' }
-    if (bw > 0.66) return { ok: false, msg: 'Move back a little' }
-    if (Math.abs(cx - 0.5) > 0.13 || Math.abs(cy - 0.5) > 0.15) return { ok: false, msg: 'Center your face' }
+    let yaw = 0.5, roll = 0
     if (k && k.length >= 3) {
       const re = k[0], le = k[1], no = k[2]
       const ex0 = Math.min(re.x, le.x), ex1 = Math.max(re.x, le.x)
-      const yaw = ex1 - ex0 > 1e-3 ? (no.x - ex0) / (ex1 - ex0) : 0.5
-      if (yaw < 0.36 || yaw > 0.64) return { ok: false, msg: 'Look straight at the camera' }
-      const roll = Math.abs(Math.atan2(le.y - re.y, le.x - re.x) * 180 / Math.PI)
-      if (Math.min(roll, Math.abs(180 - roll)) > 12) return { ok: false, msg: 'Keep your head upright' }
+      yaw = ex1 - ex0 > 1e-3 ? (no.x - ex0) / (ex1 - ex0) : 0.5
+      const r = Math.abs(Math.atan2(le.y - re.y, le.x - re.x) * 180 / Math.PI)
+      roll = Math.min(r, Math.abs(180 - r))
     }
-    return { ok: true, msg: 'Hold still…' }
+    const distOk = bw >= 0.30 && bw <= 0.66
+    const centerOk = Math.abs(cx - 0.5) <= 0.13 && Math.abs(cy - 0.5) <= 0.15
+    const frontalOk = yaw >= 0.36 && yaw <= 0.64
+    const levelOk = roll <= 12
+    const checks = [
+      { label: 'Face detected', pass: true },
+      { label: 'Good distance', pass: distOk },
+      { label: 'Centered in oval', pass: centerOk },
+      { label: 'Looking straight', pass: frontalOk },
+      { label: 'Head upright', pass: levelOk },
+    ]
+    let text = 'Hold still — capturing…'
+    if (!distOk) text = bw < 0.30 ? 'Move closer to the camera' : 'Move back a little'
+    else if (!centerOk) text = 'Center your face in the oval'
+    else if (!frontalOk) text = 'Look straight at the camera'
+    else if (!levelOk) text = 'Keep your head upright'
+    return { ok: distOk && centerOk && frontalOk && levelOk, text, checks }
   }
 
-  const draw = (ok: boolean) => {
+  const HOLD = 12  // aligned frames required before auto-capture
+
+  const draw = (ok: boolean, progress = 0) => {
     const c = canvasRef.current, v = videoRef.current; if (!c || !v) return
     const W = v.clientWidth, H = v.clientHeight; c.width = W; c.height = H
     const ctx = c.getContext('2d')!; ctx.clearRect(0, 0, W, H)
@@ -78,9 +108,16 @@ export default function EnrollModal({ onClose, onDone }: { onClose: () => void; 
     const rx = W * 0.30, ry = H * 0.40, cx = W / 2, cy = H * 0.48
     ctx.save(); ctx.globalCompositeOperation = 'destination-out'
     ctx.beginPath(); ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore()
+    // base ring
     ctx.lineWidth = 4
-    ctx.strokeStyle = ok ? 'rgb(39,215,150)' : 'rgb(255,180,84)'
+    ctx.strokeStyle = ok ? 'rgba(39,215,150,0.35)' : 'rgb(255,180,84)'
     ctx.beginPath(); ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2); ctx.stroke()
+    // countdown progress arc fills clockwise from the top while aligned
+    if (ok && progress > 0) {
+      const start = -Math.PI / 2, end = start + Math.PI * 2 * Math.min(progress, 1)
+      ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.strokeStyle = 'rgb(39,215,150)'
+      ctx.beginPath(); ctx.ellipse(cx, cy, rx, ry, 0, start, end); ctx.stroke()
+    }
   }
 
   const loop = (det: FaceDetector | null) => {
@@ -89,12 +126,10 @@ export default function EnrollModal({ onClose, onDone }: { onClose: () => void; 
     if (det && v.readyState >= 2) {
       try {
         const res = det.detectForVideo(v, performance.now())
-        if (res.detections.length) {
-          const ev = evaluate(res.detections[0])
-          setStatus(ev); draw(ev.ok)
-          alignedRef.current = ev.ok ? alignedRef.current + 1 : 0
-          if (alignedRef.current >= 12 && !capturedRef.current) { capturedRef.current = true; doCapture() }
-        } else { setStatus({ text: 'No face — look at the camera', ok: false }); draw(false); alignedRef.current = 0 }
+        const ev = evaluate(res.detections[0] || null)
+        alignedRef.current = ev.ok ? alignedRef.current + 1 : 0
+        setStatus(ev); draw(ev.ok, alignedRef.current / HOLD)
+        if (alignedRef.current >= HOLD && !capturedRef.current) { capturedRef.current = true; doCapture() }
       } catch { /* transient */ }
     }
     rafRef.current = requestAnimationFrame(() => loop(det))
@@ -141,9 +176,22 @@ export default function EnrollModal({ onClose, onDone }: { onClose: () => void; 
                 <video ref={videoRef} className="w-full h-full object-cover" muted playsInline />
                 {camOn && <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />}
                 {camOn && (
-                  <div className={`absolute bottom-2 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full text-xs font-semibold ${status.ok ? 'bg-ok/90 text-black' : 'bg-black/70 text-white'}`}>
-                    {status.ok ? '✓ ' : ''}{status.text}
-                  </div>
+                  <>
+                    {/* Prominent validation banner */}
+                    <div className={`absolute top-0 inset-x-0 px-3 py-2 text-center text-sm font-bold tracking-wide
+                      ${status.ok ? 'bg-ok text-black' : status.checks.length <= 1 ? 'bg-bad text-white' : 'bg-amber-500 text-black'}`}>
+                      {status.ok ? '✓ ' : status.checks.length <= 1 ? '⚠ ' : '◷ '}{status.text}
+                    </div>
+                    {/* Live checklist so the user sees exactly what passes */}
+                    <div className="absolute bottom-2 left-2 flex flex-col gap-1">
+                      {status.checks.map((c) => (
+                        <span key={c.label} className={`px-2 py-0.5 rounded-md text-[11px] font-semibold flex items-center gap-1
+                          ${c.pass ? 'bg-ok/90 text-black' : 'bg-black/65 text-white/80'}`}>
+                          <span>{c.pass ? '✓' : '○'}</span>{c.label}
+                        </span>
+                      ))}
+                    </div>
+                  </>
                 )}
                 {!camOn && <div className="absolute inset-0 grid place-items-center text-muted text-sm">No photo yet</div>}
               </>}
