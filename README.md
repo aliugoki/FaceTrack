@@ -1,5 +1,12 @@
 # FaceTrack — Enterprise Attendance Platform
 
+![FastAPI](https://img.shields.io/badge/FastAPI-modular-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-Vite%20%2B%20TS-61dafb?logo=react&logoColor=white)
+![Tailwind](https://img.shields.io/badge/Tailwind-CSS-38bdf8?logo=tailwindcss&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-multi--tenant-336791?logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-single--origin-2496ed?logo=docker&logoColor=white)
+![License](https://img.shields.io/badge/license-Proprietary-red)
+
 A multi-tenant, role-based attendance command center for NVIDIA DeepStream
 face-recognition pipelines. Modular **FastAPI** backend + component-based
 **React** frontend, served single-origin and containerized.
@@ -7,6 +14,19 @@ face-recognition pipelines. Modular **FastAPI** backend + component-based
 It ingests recognition events from the DeepStream pipeline (webhook), stores
 attendance, and provides live monitoring, reporting, company/camera management,
 RBAC, audit, and per-company pipeline provisioning — all isolated per tenant.
+
+```mermaid
+flowchart LR
+  CAM["Cameras (RTSP)"] --> PIPE["DeepStream pipeline\n(per company)"]
+  PIPE -->|"webhook + face snapshot"| API
+  PIPE -->|RTSP| MTX["MediaMTX"]
+  subgraph FaceTrack["FaceTrack (:5002, single origin)"]
+    API["FastAPI backend\nrouter → service → db"] --> DB[("PostgreSQL\nfacial_recognition_db")]
+    API <-->|"Socket.IO (live feed)"| UI["React SPA\n(RBAC-aware)"]
+  end
+  MTX -->|HLS / WebRTC| UI
+  API -->|"real-time push"| ERP[("Company ERP")]
+```
 
 ---
 
