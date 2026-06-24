@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Theme palettes — space-separated RGB triplets for tailwind alpha support */
+:root, [data-theme="midnight"] {
+  --bg: 11 16 32; --surface: 21 28 51; --surface2: 27 36 64; --line: 36 48 86;
+  --txt: 232 236 246; --muted: 138 150 184; --brand: 91 140 255;
+  --ok: 39 215 150; --warn: 255 180 84; --bad: 255 92 122; --violet: 155 123 255;
+}
+[data-theme="ocean"] {
+  --bg: 7 26 43; --surface: 14 44 71; --surface2: 18 54 83; --line: 29 74 110;
+  --txt: 226 240 250; --muted: 140 170 195; --brand: 54 197 240;
+  --ok: 34 211 168; --warn: 255 194 75; --bad: 255 107 139; --violet: 91 140 255;
+}
+[data-theme="emerald"] {
+  --bg: 6 22 15; --surface: 14 44 32; --surface2: 18 58 42; --line: 28 82 56;
+  --txt: 225 245 235; --muted: 140 185 162; --brand: 34 211 122;
+  --ok: 39 215 150; --warn: 255 207 92; --bad: 255 107 139; --violet: 124 224 168;
+}
+[data-theme="violet"] {
+  --bg: 18 11 34; --surface: 33 21 67; --surface2: 42 27 84; --line: 58 40 112;
+  --txt: 236 230 250; --muted: 165 150 200; --brand: 167 139 250;
+  --ok: 52 211 153; --warn: 251 191 36; --bad: 251 113 133; --violet: 196 181 253;
+}
+[data-theme="crimson"] {
+  --bg: 26 10 16; --surface: 51 21 31; --surface2: 65 27 41; --line: 92 36 54;
+  --txt: 250 230 236; --muted: 200 150 165; --brand: 255 92 122;
+  --ok: 52 211 153; --warn: 251 191 36; --bad: 255 77 109; --violet: 255 143 163;
+}
+[data-theme="light"] {
+  --bg: 238 241 247; --surface: 255 255 255; --surface2: 243 246 252; --line: 220 227 240;
+  --txt: 26 34 54; --muted: 93 107 138; --brand: 59 111 255;
+  --ok: 22 163 109; --warn: 217 119 6; --bad: 220 38 80; --violet: 124 92 255;
+}
+
+html, body, #root { height: 100%; }
+body { @apply bg-bg text-txt antialiased; font-family: Inter, system-ui, -apple-system, sans-serif; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { background: rgb(var(--line)); border-radius: 8px; }
+.card { @apply bg-surface border border-line rounded-2xl; }
+.btn { @apply bg-surface2 border border-line rounded-lg px-3 py-2 text-sm font-medium hover:bg-line transition; }
+.input { @apply bg-surface2 border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-brand; }
+@keyframes slidein { from { opacity: 0; transform: translateY(-6px);} to {opacity:1; transform:none;} }
+.animate-in { animation: slidein .3s ease; }

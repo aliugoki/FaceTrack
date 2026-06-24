@@ -1,0 +1,20 @@
+services:
+  attendance:
+    build: .
+    image: attendance-system:latest
+    container_name: attendance-system
+    restart: always
+    # Host networking so it reaches the host Postgres (:5432) and the
+    # pipeline health endpoint (:9108); serves the app on :5002.
+    network_mode: host
+    env_file:
+      - ./backend/.env
+    environment:
+      - FRONTEND_DIST=/app/frontend_dist
+      - PORT=5002
+      - CAPTURES_DIR=/app/captures
+      - RECORDINGS_DIR=/recordings
+    volumes:
+      - ./captures:/app/captures                       # live snapshots (persisted)
+      - /opt/mediamtx/recordings:/recordings:ro         # MediaMTX recordings (read-only)
+      - /home/meta/deploy/test/data/company_images:/home/meta/deploy/test/data/company_images:ro

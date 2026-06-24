@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+gunicorn
+databases[postgresql]
+asyncpg
+python-socketio
+httpx
+python-dotenv
+werkzeug
+pydantic
