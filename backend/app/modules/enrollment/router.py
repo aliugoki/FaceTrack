@@ -45,10 +45,10 @@ async def enroll(body: EnrollIn, p: Principal = Depends(require("manage_employee
     if img is None:
         raise HTTPException(400, "could not decode image")
 
-    result = face_engine.enroll_image(img)
-    if result is None:
-        raise HTTPException(422, "no face detected — retake with a clear, front-facing photo")
-    crop, emb, conf = result
+    try:
+        crop, emb, conf = face_engine.enroll_image(img)
+    except face_engine.FaceQualityError as e:
+        raise HTTPException(422, str(e))
 
     folder = await _folder(p.company_id)
     out_dir = os.path.join(settings.COMPANY_IMAGES_ROOT, folder)

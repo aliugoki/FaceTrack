@@ -71,7 +71,7 @@ export default function EnrollModal({ onClose, onDone }: { onClose: () => void; 
           <button className="btn bg-brand text-white border-brand flex-1" disabled={busy}>{busy ? 'Enrolling…' : 'Enroll'}</button>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
         </div>
-        <p className="text-xs text-muted mt-2">A clear, front-facing photo works best. The face is detected, embedded, and added to this company's gallery.</p>
+        <p className="text-xs text-muted mt-2">Look <b>straight at the camera</b> with your <b>whole face centered</b> and well-lit. The capture is quality-checked — tilted, side-on, cut-off, or far-away faces are rejected with a reason.</p>
       </form>
     </div>
   )
