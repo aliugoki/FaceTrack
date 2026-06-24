@@ -14,7 +14,10 @@ services:
       - PORT=5002
       - CAPTURES_DIR=/app/captures
       - RECORDINGS_DIR=/recordings
+      - MODELS_DIR=/app/models
     volumes:
       - ./captures:/app/captures                       # live snapshots (persisted)
       - /opt/mediamtx/recordings:/recordings:ro         # MediaMTX recordings (read-only)
-      - /home/meta/deploy/test/data/company_images:/home/meta/deploy/test/data/company_images:ro
+      # gallery is read-write so enrollment can add faces (.png/.npy):
+      - /home/meta/deploy/test/data/company_images:/home/meta/deploy/test/data/company_images
+      - /home/meta/deploy/test/models:/app/models:ro    # res10 + arcface for enrollment

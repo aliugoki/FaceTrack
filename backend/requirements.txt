@@ -8,3 +8,6 @@ httpx
 python-dotenv
 werkzeug
 pydantic
+numpy
+opencv-python-headless
+onnxruntime

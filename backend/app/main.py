@@ -25,6 +25,7 @@ from app.modules.cameras.router import router as cameras_router
 from app.modules.companies.router import router as companies_router
 from app.modules.recordings.router import router as recordings_router
 from app.modules.pipeline.router import router as pipeline_router
+from app.modules.enrollment.router import router as enrollment_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("main")
@@ -45,7 +46,8 @@ app.add_middleware(
 
 for r in (auth_router, attendance_router, employees_router, reports_router,
           erp_router, users_router, tenants_router, audit_router, settings_router,
-          cameras_router, companies_router, recordings_router, pipeline_router):
+          cameras_router, companies_router, recordings_router, pipeline_router,
+          enrollment_router):
     app.include_router(r)
 
 

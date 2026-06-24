@@ -44,6 +44,9 @@ class Settings:
     # Shared secret for the host-side pipeline agent (empty = agent disabled)
     AGENT_TOKEN: str = os.getenv("AGENT_TOKEN", "")
 
+    # Face models for in-dashboard employee enrollment (res10 detector + ArcFace)
+    MODELS_DIR: str = os.getenv("MODELS_DIR", "/app/models")
+
     PORT: int = int(os.getenv("PORT", "5002"))
 
     # Built React SPA to serve (single-origin production). Empty in dev (Vite serves).

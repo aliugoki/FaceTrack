@@ -3,9 +3,9 @@ from werkzeug.security import check_password_hash, generate_password_hash  # noq
 
 ROLE_PERMS = {
     "super_admin": {"view", "view_reports", "export", "manage_attendance", "manage_users", "view_tenants",
-                    "view_audit", "manage_settings", "manage_cameras", "manage_tenants"},
+                    "view_audit", "manage_settings", "manage_cameras", "manage_tenants", "manage_employees"},
     "admin":       {"view", "view_reports", "export", "manage_attendance", "manage_users",
-                    "view_audit", "manage_settings", "manage_cameras"},
+                    "view_audit", "manage_settings", "manage_cameras", "manage_employees"},
     "manager":     {"view", "view_reports", "export"},
     "viewer":      {"view", "view_reports"},
 }
