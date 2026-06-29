@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
 import { Card, toast } from '../components/ui'
 import { useAuth } from '../context/AuthContext'
+import { hlsUrl, webrtcUrl, hasStream } from '../lib/streams'
 
 const BLANK = { name: '', location: '', type: 'entrance', rtsp_url: '', hls_url: '', webrtc_url: '', enabled: true }
 
@@ -11,6 +12,7 @@ export default function Cameras() {
   const [list, setList] = useState<any[]>([])
   const [form, setForm] = useState<any>(BLANK)
   const [editId, setEditId] = useState<number | null>(null)
+  const [showAdv, setShowAdv] = useState(false)
 
   const load = () => api('/api/cameras').then(setList).catch(() => {})
   useEffect(() => { load() }, [])
@@ -20,11 +22,15 @@ export default function Cameras() {
     try {
       if (editId) await api(`/api/cameras/${editId}`, { method: 'PUT', body: form })
       else await api('/api/cameras', { method: 'POST', body: form })
-      toast('Camera saved', 'ok'); setForm(BLANK); setEditId(null); load()
+      toast('Camera saved', 'ok'); setForm(BLANK); setEditId(null); setShowAdv(false); load()
     } catch (err: any) { toast(err.message || 'Save failed', 'err') }
   }
-  const edit = (c: any) => { setForm({ ...c }); setEditId(c.id) }
+  const edit = (c: any) => { setForm({ ...c }); setEditId(c.id); setShowAdv(!!(c.hls_url || c.webrtc_url)) }
   const del = async (id: number) => { if (!confirm('Delete this camera?')) return; await api(`/api/cameras/${id}`, { method: 'DELETE' }); load() }
+
+  // Derived live-stream URLs for the camera currently being edited.
+  const autoHls = editId ? hlsUrl({ ...form, hls_url: '' }) : null
+  const autoWebrtc = editId ? webrtcUrl({ ...form, webrtc_url: '' }) : null
 
   return (
     <div className="flex flex-col gap-4">
@@ -37,12 +43,33 @@ export default function Cameras() {
               <option value="entrance">entrance</option><option value="exit">exit</option><option value="general">general</option>
             </select>
             <input className="input md:col-span-3" placeholder="RTSP source URL (for the pipeline)" value={form.rtsp_url || ''} onChange={(e) => setForm({ ...form, rtsp_url: e.target.value })} />
-            <input className="input" placeholder="HLS URL (playback)" value={form.hls_url || ''} onChange={(e) => setForm({ ...form, hls_url: e.target.value })} />
-            <input className="input" placeholder="WebRTC URL (playback)" value={form.webrtc_url || ''} onChange={(e) => setForm({ ...form, webrtc_url: e.target.value })} />
+
+            {/* HLS/WebRTC playback URLs are generated automatically from the
+                camera's stream path — no manual entry needed. */}
+            <div className="md:col-span-3 text-xs text-muted rounded-lg bg-surface2 px-3 py-2">
+              {editId && form.stream_path ? (
+                <>
+                  <div className="mb-1">Live stream <b className="text-fg">auto-generated</b> (path <code>{form.stream_path}</code>):</div>
+                  <div className="break-all">HLS&nbsp;&nbsp;&nbsp;<code>{form.hls_url || autoHls || '—'}</code></div>
+                  <div className="break-all">WebRTC&nbsp;<code>{form.webrtc_url || autoWebrtc || '—'}</code></div>
+                </>
+              ) : (
+                <>HLS &amp; WebRTC playback URLs are generated automatically once the camera is enabled with an RTSP source.</>
+              )}
+            </div>
+
             <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} /> Enabled</label>
+            <button type="button" className="text-xs text-brand text-left md:col-span-2" onClick={() => setShowAdv(!showAdv)}>
+              {showAdv ? '▾ Hide manual override' : '▸ Manual playback URL override (advanced)'}
+            </button>
+            {showAdv && <>
+              <input className="input md:col-span-3" placeholder="HLS URL override (leave blank for auto)" value={form.hls_url || ''} onChange={(e) => setForm({ ...form, hls_url: e.target.value })} />
+              <input className="input md:col-span-3" placeholder="WebRTC URL override (leave blank for auto)" value={form.webrtc_url || ''} onChange={(e) => setForm({ ...form, webrtc_url: e.target.value })} />
+            </>}
+
             <div className="md:col-span-3 flex gap-2">
               <button className="btn bg-brand text-white border-brand">{editId ? 'Update' : 'Add camera'}</button>
-              {editId && <button type="button" className="btn" onClick={() => { setForm(BLANK); setEditId(null) }}>Cancel</button>}
+              {editId && <button type="button" className="btn" onClick={() => { setForm(BLANK); setEditId(null); setShowAdv(false) }}>Cancel</button>}
             </div>
           </form>
         </Card>
@@ -56,7 +83,7 @@ export default function Cameras() {
                 <td className="px-3.5 py-2.5 font-medium">{c.name}</td>
                 <td className="px-3.5 py-2.5 text-muted">{c.location || '—'}</td>
                 <td className="px-3.5 py-2.5">{c.type}</td>
-                <td className="px-3.5 py-2.5 text-muted">{c.hls_url ? 'HLS' : c.webrtc_url ? 'WebRTC' : c.rtsp_url ? 'RTSP only' : '—'}</td>
+                <td className="px-3.5 py-2.5 text-muted">{(c.hls_url || c.webrtc_url) ? 'Manual' : hasStream(c) ? 'Auto (HLS+WebRTC)' : c.rtsp_url ? 'RTSP only' : '—'}</td>
                 <td className="px-3.5 py-2.5"><span className={`w-2.5 h-2.5 rounded-full inline-block ${c.enabled ? 'bg-ok' : 'bg-line'}`} /></td>
                 <td className="px-3.5 py-2.5">{manage && <span className="flex gap-2"><button className="btn" onClick={() => edit(c)}>Edit</button><button className="btn text-bad" onClick={() => del(c.id)}>Delete</button></span>}</td>
               </tr>

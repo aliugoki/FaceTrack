@@ -31,11 +31,10 @@ def _toml(company_name, admin_username, cams, index):
     n = max(len(cams), 1)
     rtsp = 8555 + index
     health = 9108 + index
-    udp = 5400 + index
     lines = [
         f"# Generated for {company_name} ({admin_username}) — pipeline config",
         "[pipeline]",
-        "display = 0",
+        "display = 1",                       # render annotated output on the host's local monitor
         f"num_sources = {n}",
         f"muxer_batch_size = {n}",
         "rec_threshold = 0.35",
@@ -57,8 +56,15 @@ def _toml(company_name, admin_username, cams, index):
         "",
         "[tiler]", "width = 1280", "height = 720",
         "",
-        "[rtsp_server]", 'mount-point = "/mystream"', "enable_rtsp_streaming = false",
-        f"port = {rtsp}", 'codec = "H264"', f"udpsink-port = {udp}", 'udpsink-host = "127.0.0.1"',
+        # One annotated RTSP mount per camera (/cam0, /cam1, …) on this company's
+        # RTSP port; MediaMTX pulls each into a {admin_username}_cam{i} path for
+        # browser HLS/WebRTC. udpsink ports are offset by index to avoid collisions
+        # between concurrently-running company pipelines.
+        "[rtsp_server]",
+        "enable_rtsp_streaming = true",
+        f"port = {rtsp}", 'codec = "H264"', 'udpsink-host = "127.0.0.1"',
+        "mount-points = [" + ", ".join(f'"/cam{i}"' for i in range(n)) + "]",
+        "udpsink-ports = [" + ", ".join(str(5400 + index * 16 + i) for i in range(n)) + "]",
         "",
     ]
     for c in cams:

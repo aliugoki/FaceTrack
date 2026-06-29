@@ -1,20 +1,49 @@
-"""Per-company camera management."""
+"""Per-company camera management.
+
+Each enabled camera that feeds the pipeline also gets a deterministic
+``stream_path`` — the MediaMTX path its annotated live stream is published at.
+The path is ``{admin_username}_cam{i}`` where ``i`` is the camera's 0-based
+position among the company's enabled, RTSP-backed cameras ordered by name.
+This MUST match the pipeline's per-camera RTSP mounts (``/cam{i}`` on the
+company's RTSP port) and the MediaMTX paths generated from the same ordering
+(see deepstream/tools/gen_company_config.py + gen_mediamtx_paths.py).
+
+The browser-facing HLS/WebRTC URLs are built from this path on the client
+(host-relative), so no host/IP is baked in here. ``hls_url`` / ``webrtc_url``
+remain supported as optional manual overrides.
+"""
 from sqlalchemy import delete
-from app.core.db import database, cameras
+from app.core.db import database, cameras, companies
 
 FIELDS = ("name", "location", "type", "rtsp_url", "hls_url", "webrtc_url", "enabled")
 
 
-def _row(r):
+def _eligible(r):
+    """Cameras the pipeline streams: enabled with a non-empty RTSP source."""
+    return bool(r["enabled"]) and bool((r["rtsp_url"] or "").strip())
+
+
+def _row(r, stream_path=None):
     d = {k: r[k] for k in ("id", "company_id", *FIELDS)}
     d["created_at"] = r["created_at"].isoformat() if r["created_at"] else None
+    d["stream_path"] = stream_path
     return d
 
 
 async def list_cameras(company_id):
     rows = await database.fetch_all(
         cameras.select().where(cameras.c.company_id == company_id).order_by(cameras.c.name))
-    return [_row(r) for r in rows]
+    comp = await database.fetch_one(
+        companies.select().where(companies.c.company_id == company_id))
+    username = comp["admin_username"] if comp else None
+    out, i = [], 0
+    for r in rows:
+        path = None
+        if username and _eligible(r):
+            path = f"{username}_cam{i}"
+            i += 1
+        out.append(_row(r, path))
+    return out
 
 
 async def create(company_id, data):
