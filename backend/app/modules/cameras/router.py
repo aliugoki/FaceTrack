@@ -17,6 +17,11 @@ class CameraIn(BaseModel):
     hls_url: str | None = None
     webrtc_url: str | None = None
     enabled: bool = True
+    detection_area: list | None = None   # polygon [[x,y],...] normalized 0..1
+
+
+class AreaIn(BaseModel):
+    detection_area: list   # polygon [[x,y],...] normalized 0..1; [] clears it
 
 
 @router.get("")
@@ -41,6 +46,17 @@ async def create_camera(body: CameraIn, p: Principal = Depends(require("manage_c
 async def update_camera(cid: int, body: CameraIn, p: Principal = Depends(require("manage_cameras"))):
     await service.update(p.company_id, cid, body.model_dump())
     await audit.record(p.company_id, p.actor, p.role, "camera.update", body.name)
+    return {"status": "ok"}
+
+
+@router.put("/{cid}/area")
+async def set_detection_area(cid: int, body: AreaIn,
+                            p: Principal = Depends(require("manage_cameras"))):
+    """Save just the per-camera detection zone (drawn in the dashboard). Send an
+    empty list to clear it (whole frame). Takes effect on the next pipeline (re)start."""
+    await service.update(p.company_id, cid, {"detection_area": body.detection_area})
+    await audit.record(p.company_id, p.actor, p.role, "camera.area",
+                       f"{cid} points={len(body.detection_area)}")
     return {"status": "ok"}
 
 

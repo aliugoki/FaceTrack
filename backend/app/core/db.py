@@ -134,6 +134,10 @@ cameras = Table(
     Column("hls_url", String, nullable=True),        # playback (MediaMTX HLS)
     Column("webrtc_url", String, nullable=True),     # playback (MediaMTX WebRTC)
     Column("enabled", Boolean, default=True),
+    # Detection zone: JSON string of a polygon [[x,y],...] normalized to 0..1.
+    # Attendance only triggers inside it; null/empty = whole frame. Drawn per
+    # camera in the dashboard; consumed by deepstream/tools/gen_company_config.py.
+    Column("detection_area", String, nullable=True),
     Column("created_at", DateTime, default=datetime.datetime.now),
 )
 
@@ -175,6 +179,9 @@ async def connect_and_init():
         id SERIAL PRIMARY KEY, company_id TEXT, name TEXT NOT NULL, location TEXT,
         type TEXT DEFAULT 'entrance', rtsp_url TEXT, hls_url TEXT, webrtc_url TEXT,
         enabled BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT now())""")
+    # Additive: per-camera detection zone (JSON polygon, normalized 0..1).
+    await database.execute(
+        "ALTER TABLE cameras ADD COLUMN IF NOT EXISTS detection_area TEXT")
     await database.execute("""CREATE TABLE IF NOT EXISTS pipeline_agent_state (
         id INTEGER PRIMARY KEY, payload TEXT, updated_at TIMESTAMP DEFAULT now())""")
 
