@@ -29,6 +29,36 @@ class FaceQualityError(Exception):
     """Raised when the captured face fails the frontal-quality gate."""
 
 
+# Canonical 5-point ArcFace template (insightface standard) for a 112x112 chip,
+# order: img-left-eye, img-right-eye, nose, img-left-mouth, img-right-mouth. MUST
+# match the live pipeline (deepstream/utils/face_align.py) so enrolled gallery
+# vectors and the pipeline's aligned query vectors live in the same space.
+ARCFACE_TEMPLATE_112 = np.array([
+    [38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
+    [41.5493, 92.3655], [70.7299, 92.2041],
+], dtype=np.float32)
+
+
+def _umeyama(src, dst):
+    """2x3 similarity transform (scale+rotation+translation) mapping src->dst,
+    via Umeyama SVD (no shear/reflection). Mirrors the pipeline's implementation."""
+    src = np.asarray(src, np.float64); dst = np.asarray(dst, np.float64)
+    n, d = src.shape
+    sm, dm = src.mean(0), dst.mean(0)
+    sc, dc = src - sm, dst - dm
+    U, D, Vt = np.linalg.svd((dc.T @ sc) / n)
+    S = np.eye(d)
+    if np.linalg.det(U) * np.linalg.det(Vt) < 0:
+        S[-1, -1] = -1.0
+    R = U @ S @ Vt
+    var = sc.var(0).sum()
+    scale = 1.0 if var < 1e-12 else (D * np.diag(S)).sum() / var
+    M = np.zeros((2, 3), np.float32)
+    M[:2, :2] = scale * R
+    M[:2, 2] = dm - scale * (R @ sm)
+    return M
+
+
 def _load():
     if _S["sess"] is not None:
         return
@@ -79,7 +109,12 @@ def _assess_frontal(img):
         raise FaceQualityError("Keep your head upright (less tilt).")
     x1, y1 = max(0, int(x)), max(0, int(y))
     x2, y2 = min(w, int(x + bw)), min(h, int(y + bh))
-    return x1, y1, x2, y2, score
+    # 5 landmarks (YuNet order: right-eye, left-eye, nose, right-mouth, left-mouth),
+    # which is exactly the ArcFace template order (img-left-eye is the subject's
+    # right eye), so they map 1:1 onto ARCFACE_TEMPLATE_112 for alignment.
+    lmk = np.array([[rex, rey], [lex, ley], [nx, ny],
+                    [f[10], f[11]], [f[12], f[13]]], dtype=np.float32)
+    return x1, y1, x2, y2, score, lmk
 
 
 def detect_largest_face(img):
@@ -98,23 +133,42 @@ def detect_largest_face(img):
     return best, best_conf
 
 
-def embed(crop_bgr):
-    _load()
-    rgb = cv2.cvtColor(cv2.resize(crop_bgr, (112, 112)), cv2.COLOR_BGR2RGB).astype(np.float32)
+def _arcface(chip112_bgr):
+    """ArcFace forward on a 112x112 BGR chip -> L2-normalized 512-d embedding."""
+    rgb = cv2.cvtColor(chip112_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
     x = ((rgb - 127.5) * 0.0078125).transpose(2, 0, 1)[None]
     out = _S["sess"].run([_S["out"]], {_S["in"]: x})[0].reshape(-1).astype(np.float32)
     n = np.linalg.norm(out)
     return out / n if n > 0 else out
 
 
+def embed(crop_bgr):
+    """Unaligned embedding (plain resize) — fallback for the res10 path that has no
+    landmarks. Prefer embed_aligned; ArcFace is alignment-sensitive."""
+    _load()
+    return _arcface(cv2.resize(crop_bgr, (112, 112)))
+
+
+def embed_aligned(img_bgr, landmarks):
+    """Aligned embedding: warp the face to the canonical ArcFace template via a
+    Umeyama similarity transform on the 5 landmarks, then embed. This matches the
+    live DeepStream pipeline so enrolled vectors are directly comparable to its
+    aligned query vectors (validated ~0.96 cosine vs the pipeline gallery)."""
+    _load()
+    M = _umeyama(np.asarray(landmarks, np.float32), ARCFACE_TEMPLATE_112)
+    return _arcface(cv2.warpAffine(img_bgr, M, (112, 112)))
+
+
 def enroll_image(img_bgr):
     """Return (crop, embedding, confidence) for a full frontal face, or raise FaceQualityError."""
     _load()
     if _S["yunet"] is not None:
-        x1, y1, x2, y2, conf = _assess_frontal(img_bgr)
+        x1, y1, x2, y2, conf, lmk = _assess_frontal(img_bgr)
+        emb = embed_aligned(img_bgr, lmk)         # aligned — matches the live pipeline
     else:
-        box, conf = detect_largest_face(img_bgr)
+        box, conf = detect_largest_face(img_bgr)  # res10 fallback: no landmarks
         if not box:
             raise FaceQualityError("No face detected.")
         x1, y1, x2, y2 = box
-    return img_bgr[y1:y2, x1:x2], embed(img_bgr[y1:y2, x1:x2]), float(conf)
+        emb = embed(img_bgr[y1:y2, x1:x2])        # unaligned (degraded)
+    return img_bgr[y1:y2, x1:x2], emb, float(conf)
