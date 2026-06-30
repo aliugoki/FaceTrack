@@ -177,7 +177,7 @@ Enrollment turns a photo into a stored face the pipeline can recognize.
   - DB upsert into `user_data` with `image_path`/`feature_path` = those filenames.
 - The pipeline consumes this same folder as its **known-faces gallery**
   (`known_face_dir` in the generated config). The pipeline hot-reloads the gallery
-  when the folder changes (see §8), so a newly enrolled face is recognized **without
+  when the folder changes (see §9), so a newly enrolled face is recognized **without
   restarting the pipeline**.
 
 ---
@@ -307,7 +307,46 @@ nvurisrcbin (per camera, TCP RTSP, auto-reconnect)
 
 ---
 
-## 8. Hot reload — what is dynamic vs what needs a restart
+## 8. Detection areas — per-camera attendance zones
+
+Each camera can have a **detection zone**: a polygon you draw in the dashboard.
+A recognized person is only logged for attendance when they are **inside** that
+zone. A camera with no zone uses the **whole frame** (the default). This replaces
+the old single hard-coded rectangle that was shared by every camera.
+
+### How it's stored & flows
+- **Where:** `cameras.detection_area` — a JSON string holding a polygon
+  `[[x,y],…]` whose coordinates are **normalized 0..1** (so they're independent of
+  the camera/stream resolution). Empty/null = whole frame.
+- **Draw it:** *Cameras* page → **"Zone"** button on a camera (a `●` marks cameras
+  that already have one). The `DetectionAreaModal` shows the camera's live HLS view;
+  click to drop polygon points. Saved via `PUT /api/cameras/{id}/area`
+  (`manage_cameras`); send `[]` to clear.
+- **Into the pipeline:** `deepstream/tools/gen_company_config.py` reads the column
+  and emits `detection_area = [[x,y],…]` under that camera's `[[sources]]` in the
+  generated TOML.
+- **Enforced:** `EnterpriseRecognizer` (`utils/probe_enterprise.py`) scales the
+  polygon to the muxer frame (`[streammux] width×height`, 1280×720), runs a
+  **point-in-polygon** test on each tracked person's box centre (`_in_area`), and
+  only enqueues an attendance event when inside. It also **draws the zone outline**
+  (green) on the annotated stream.
+
+### Coordinate space & semantics
+- Coordinates are normalized to the **1280×720 muxer frame** the recognition probe
+  runs on (per-source, before the tiler) — the same frame the annotated stream
+  shows — so what you draw over the live view maps 1:1 to what's enforced.
+- The test uses the person's **bounding-box centre**.
+- The line-crossing overlay (a separate legacy in/out mechanism) is unaffected.
+
+### When it applies
+The GStreamer graph reads source config **at startup**, so a new/edited zone takes
+effect on the **next pipeline (re)start** (Pipeline page → *Restart*) — the same
+rule as adding or changing a camera (see §9). Zones are managed per company, like
+the cameras themselves.
+
+---
+
+## 9. Hot reload — what is dynamic vs what needs a restart
 
 This answers a common question directly.
 
@@ -347,7 +386,7 @@ camera set, and recreate takes seconds once the baked image
 
 ---
 
-## 9. Authentication & roles
+## 10. Authentication & roles
 
 - **Two identity systems, one `Principal`:**
   - *Legacy company admin* — lives in `companies`; login matches
@@ -372,7 +411,7 @@ camera set, and recreate takes seconds once the baked image
 
 ---
 
-## 10. Dashboard features (by page)
+## 11. Dashboard features (by page)
 
 | Page | Permission | What you can do |
 |------|-----------|-----------------|
@@ -380,7 +419,7 @@ camera set, and recreate takes seconds once the baked image
 | **Live Wall** | any | grid of enabled cameras; WebRTC (preferred) / HLS annotated streams |
 | **Attendance** | any | real-time, filterable attendance log (search/date/in-out/status); CSV export; row → employee card |
 | **Employees** | view; enroll/delete need `manage_employees` | directory with present/absent; live-capture enroll; bulk import; delete (also removes face files) |
-| **Cameras** | view; edit needs `manage_cameras` | CRUD cameras (name/location/type/RTSP); auto-derived HLS/WebRTC URLs + manual overrides |
+| **Cameras** | view; edit needs `manage_cameras` | CRUD cameras (name/location/type/RTSP); auto-derived HLS/WebRTC URLs + manual overrides; **"Zone"** to draw a per-camera detection area (§8) |
 | **Recordings** | `manage_cameras` | browse + play MediaMTX recordings |
 | **Reports** | `view_reports` | date-range analytics, daily/late charts, per-employee attendance-% table, CSV |
 | **ERP Sync** | view; resync needs `manage_attendance` | ERP endpoint status, synced/pending counts, resync pending |
@@ -393,7 +432,7 @@ camera set, and recreate takes seconds once the baked image
 
 ---
 
-## 11. Operations
+## 12. Operations
 
 ### Launch a company pipeline (manually)
 ```bash
@@ -437,15 +476,15 @@ After a host reboot:
 
 ---
 
-## 12. Troubleshooting & known issues
+## 13. Troubleshooting & known issues
 
 | Symptom | Cause / fix |
 |---------|-------------|
-| "Start" toasts **Queued …** then nothing happens | Host agent not running. Start/enable `pipeline-agent` (§11). |
+| "Start" toasts **Queued …** then nothing happens | Host agent not running. Start/enable `pipeline-agent` (§12). |
 | Live wall **404 / "no stream available"** | No pipeline publishing that path, **or** you're viewing the wrong company's path (e.g. `admin_cam0` when only `comet_cam0` exists). Browser path = `{admin_username}_cam{i}`. |
 | Pipeline reaches `PLAYING` then **segfaults** | Surface memory type bug — `NVBUF_MEM_CUDA_UNIFIED` must be `3`, not `2` (`2` is device-only). Fixed in `deepstream` (PR on `fix/probe-nvbuf-memtype-segfault`). |
 | `[TRT] CUDA initialization failure with error: 3` host-wide | UVM wedged. `sudo modprobe -r nvidia_uvm && sudo modprobe nvidia_uvm`, or reboot. |
-| `error 100 / no CUDA-capable device` right after reboot | Transient cold-GPU first init; warm CUDA then relaunch (§11). |
+| `error 100 / no CUDA-capable device` right after reboot | Transient cold-GPU first init; warm CUDA then relaunch (§12). |
 | MediaMTX keeps dialing an **old port** after a config change | Hot-reload didn't re-pull an existing path's changed source; `docker restart mediamtx`. |
 | Two companies' streams collide | Both share an **index** in `_indices.json`; give each concurrently-running company a unique index. |
 | Camera change not reflected in the stream | Cameras aren't hot-reloaded — **restart the pipeline** (Pipeline → Restart). |
@@ -453,7 +492,7 @@ After a host reboot:
 
 ---
 
-## 13. Repos & key paths
+## 14. Repos & key paths
 
 ```
 /home/meta/deploy/
