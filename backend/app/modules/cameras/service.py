@@ -30,19 +30,47 @@ def _row(r, stream_path=None):
     return d
 
 
-async def list_cameras(company_id):
-    rows = await database.fetch_all(
-        cameras.select().where(cameras.c.company_id == company_id).order_by(cameras.c.name))
-    comp = await database.fetch_one(
-        companies.select().where(companies.c.company_id == company_id))
-    username = comp["admin_username"] if comp else None
+def _company_cameras(rows, username, company_name=None):
+    """Build camera dicts for one company, assigning stream_path by the canonical
+    0-based ordering among that company's eligible cameras."""
     out, i = [], 0
     for r in rows:
         path = None
         if username and _eligible(r):
             path = f"{username}_cam{i}"
             i += 1
-        out.append(_row(r, path))
+        d = _row(r, path)
+        if company_name is not None:
+            d["company_name"] = company_name
+        out.append(d)
+    return out
+
+
+async def list_cameras(company_id):
+    rows = await database.fetch_all(
+        cameras.select().where(cameras.c.company_id == company_id).order_by(cameras.c.name))
+    comp = await database.fetch_one(
+        companies.select().where(companies.c.company_id == company_id))
+    username = comp["admin_username"] if comp else None
+    return _company_cameras(rows, username)
+
+
+async def list_live_cameras(principal):
+    """Cameras for the Live Wall. A cross-tenant viewer (super-admin, has
+    ``view_tenants``) sees every company's eligible cameras — each with its own
+    company's ``stream_path`` and a ``company_name`` label — so the whole fleet's
+    live streams are visible from one place. Everyone else sees only their own
+    company. (Per-company camera *management* still uses ``list_cameras``.)"""
+    if "view_tenants" not in getattr(principal, "permissions", []):
+        return await list_cameras(principal.company_id)
+    comps = await database.fetch_all(
+        companies.select().order_by(companies.c.company_name))
+    out = []
+    for comp in comps:
+        rows = await database.fetch_all(
+            cameras.select().where(cameras.c.company_id == comp["company_id"])
+            .order_by(cameras.c.name))
+        out.extend(_company_cameras(rows, comp["admin_username"], comp["company_name"]))
     return out
 
 

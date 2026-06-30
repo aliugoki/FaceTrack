@@ -24,6 +24,12 @@ async def list_cameras(p: Principal = Depends(get_principal)):
     return await service.list_cameras(p.company_id)
 
 
+@router.get("/live")
+async def list_live_cameras(p: Principal = Depends(get_principal)):
+    """Live Wall feed — fleet-wide for super-admins, own-company otherwise."""
+    return await service.list_live_cameras(p)
+
+
 @router.post("")
 async def create_camera(body: CameraIn, p: Principal = Depends(require("manage_cameras"))):
     cid = await service.create(p.company_id, body.model_dump())
