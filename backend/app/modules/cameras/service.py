@@ -12,6 +12,8 @@ The browser-facing HLS/WebRTC URLs are built from this path on the client
 (host-relative), so no host/IP is baked in here. ``hls_url`` / ``webrtc_url``
 remain supported as optional manual overrides.
 """
+import json
+
 from sqlalchemy import delete
 from app.core.db import database, cameras, companies
 
@@ -23,10 +25,22 @@ def _eligible(r):
     return bool(r["enabled"]) and bool((r["rtsp_url"] or "").strip())
 
 
+def _parse_area(raw):
+    """detection_area is stored as a JSON string ([[x,y],...] normalized 0..1);
+    return it as a list for the API (or None)."""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
 def _row(r, stream_path=None):
     d = {k: r[k] for k in ("id", "company_id", *FIELDS)}
     d["created_at"] = r["created_at"].isoformat() if r["created_at"] else None
     d["stream_path"] = stream_path
+    d["detection_area"] = _parse_area(r["detection_area"])
     return d
 
 
@@ -46,14 +60,22 @@ async def list_cameras(company_id):
     return out
 
 
+def _area_to_db(data, vals):
+    """Serialize a detection_area polygon (list) to its JSON-string column value."""
+    if "detection_area" in data and data["detection_area"] is not None:
+        vals["detection_area"] = json.dumps(data["detection_area"])
+
+
 async def create(company_id, data):
     vals = {k: data.get(k) for k in FIELDS}
     vals["enabled"] = bool(data.get("enabled", True))
+    _area_to_db(data, vals)
     return await database.execute(cameras.insert().values(company_id=company_id, **vals))
 
 
 async def update(company_id, cid, data):
     vals = {k: data[k] for k in FIELDS if k in data and data[k] is not None}
+    _area_to_db(data, vals)
     if vals:
         await database.execute(cameras.update()
             .where((cameras.c.id == cid) & (cameras.c.company_id == company_id)).values(**vals))

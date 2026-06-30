@@ -3,6 +3,7 @@ import { api } from '../lib/api'
 import { Card, toast } from '../components/ui'
 import { useAuth } from '../context/AuthContext'
 import { hlsUrl, webrtcUrl, hasStream } from '../lib/streams'
+import DetectionAreaModal from '../components/DetectionAreaModal'
 
 const BLANK = { name: '', location: '', type: 'entrance', rtsp_url: '', hls_url: '', webrtc_url: '', enabled: true }
 
@@ -13,6 +14,7 @@ export default function Cameras() {
   const [form, setForm] = useState<any>(BLANK)
   const [editId, setEditId] = useState<number | null>(null)
   const [showAdv, setShowAdv] = useState(false)
+  const [areaCam, setAreaCam] = useState<any | null>(null)   // camera whose zone is being drawn
 
   const load = () => api('/api/cameras').then(setList).catch(() => {})
   useEffect(() => { load() }, [])
@@ -85,13 +87,14 @@ export default function Cameras() {
                 <td className="px-3.5 py-2.5">{c.type}</td>
                 <td className="px-3.5 py-2.5 text-muted">{(c.hls_url || c.webrtc_url) ? 'Manual' : hasStream(c) ? 'Auto (HLS+WebRTC)' : c.rtsp_url ? 'RTSP only' : '—'}</td>
                 <td className="px-3.5 py-2.5"><span className={`w-2.5 h-2.5 rounded-full inline-block ${c.enabled ? 'bg-ok' : 'bg-line'}`} /></td>
-                <td className="px-3.5 py-2.5">{manage && <span className="flex gap-2"><button className="btn" onClick={() => edit(c)}>Edit</button><button className="btn text-bad" onClick={() => del(c.id)}>Delete</button></span>}</td>
+                <td className="px-3.5 py-2.5">{manage && <span className="flex gap-2"><button className="btn" onClick={() => edit(c)}>Edit</button><button className="btn" title="Draw detection zone" onClick={() => setAreaCam(c)}>Zone{Array.isArray(c.detection_area) && c.detection_area.length >= 3 ? ' ●' : ''}</button><button className="btn text-bad" onClick={() => del(c.id)}>Delete</button></span>}</td>
               </tr>
             ))}
             {!list.length && <tr><td colSpan={6} className="px-3.5 py-4 text-muted">No cameras yet.</td></tr>}
           </tbody>
         </table>
       </Card>
+      {areaCam && <DetectionAreaModal cam={areaCam} onClose={() => setAreaCam(null)} onSaved={() => load()} />}
     </div>
   )
 }
