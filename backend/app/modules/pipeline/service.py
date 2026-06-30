@@ -84,13 +84,26 @@ async def agent_state() -> dict:
     }
 
 
-async def current_index(username: str) -> int:
-    """A company's working index = its most recent *start* job (default 0)."""
-    row = await database.fetch_one(
-        pipeline_jobs.select()
-        .where((pipeline_jobs.c.username == username) & (pipeline_jobs.c.action != "stop"))
-        .order_by(pipeline_jobs.c.id.desc()).limit(1))
-    return int(row["idx"]) if row and row["idx"] is not None else 0
+async def company_index(company_id) -> int:
+    """Stable, UNIQUE pipeline slot for a company = its 0-based position among all
+    companies ordered by ``company_name`` (the same ordering used elsewhere for
+    per-camera stream paths). Each company therefore maps to distinct ports
+    (RTSP ``8555+idx``, health ``9108+idx``), so the fleet status can't mistake one
+    company's running pipeline for another's. Previously the index defaulted to 0
+    for every company, so non-running tenants all probed comet's :9108 and showed a
+    false "healthy" badge.
+
+    Trade-off: adding/renaming a company can shift positions; a running pipeline
+    then needs a relaunch to land on its new ports. Renames are rare and this keeps
+    the index derivable identically on both the dashboard and the launcher (no
+    extra state)."""
+    rows = await database.fetch_all(
+        companies.select().order_by(companies.c.company_name))
+    cid = str(company_id)
+    for i, r in enumerate(rows):
+        if str(r["company_id"]) == cid:
+            return i
+    return 0
 
 
 def _derive_state(container: dict | None, health: dict, agent_online: bool) -> str:
@@ -113,10 +126,10 @@ async def fleet_status() -> dict:
     agent = await agent_state()
     by_name = {c.get("name"): c for c in agent["containers"]}
 
-    async def one(r):
+    async def one(idx, r):
         user = r["admin_username"]
         cid = str(r["company_id"])
-        idx = await current_index(user)
+        # idx = the company's unique slot (its position in the name-ordered list).
         cam_count = await database.fetch_val(
             "SELECT count(*) FROM cameras WHERE company_id = :cid AND enabled = true "
             "AND rtsp_url IS NOT NULL AND rtsp_url <> ''", {"cid": cid})
@@ -137,7 +150,7 @@ async def fleet_status() -> dict:
             "container": cont,   # {name,state,status,running_for,log} or None
         }
 
-    pipelines = await asyncio.gather(*[one(r) for r in comp_rows])
+    pipelines = await asyncio.gather(*[one(i, r) for i, r in enumerate(comp_rows)])
     running = sum(1 for p in pipelines if p["state"] in ("healthy", "degraded", "starting"))
     cams_live = sum(p["live_sources"] or 0 for p in pipelines)
     return {
