@@ -36,8 +36,10 @@ export default function DetectionAreaModal({ cam, onClose, onSaved }: any) {
     if (pts.length && pts.length < 3) { toast('Add at least 3 points, or Clear to use the whole frame', 'err'); return }
     setSaving(true)
     try {
-      await api(`/api/cameras/${cam.id}/area`, { method: 'PUT', body: { detection_area: pts } })
-      toast('Detection area saved — restart this camera’s pipeline to apply', 'ok')
+      const r = await api(`/api/cameras/${cam.id}/area`, { method: 'PUT', body: { detection_area: pts } })
+      toast(r && r.restart_queued
+        ? 'Detection area saved — pipeline restarting to apply…'
+        : 'Detection area saved — start this camera’s pipeline to apply', 'ok')
       onSaved && onSaved(pts); onClose()
     } catch (e: any) { toast(e.message || 'Save failed', 'err') } finally { setSaving(false) }
   }

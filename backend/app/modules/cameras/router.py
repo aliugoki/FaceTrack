@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 from app.core.deps import Principal, get_principal, require
 from app.modules.cameras import service
+from app.modules.pipeline import service as pipeline_service
 from app.modules.audit import service as audit
 
 router = APIRouter(prefix="/api/cameras", tags=["cameras"])
@@ -57,7 +58,10 @@ async def set_detection_area(cid: int, body: AreaIn,
     await service.update(p.company_id, cid, {"detection_area": body.detection_area})
     await audit.record(p.company_id, p.actor, p.role, "camera.area",
                        f"{cid} points={len(body.detection_area)}")
-    return {"status": "ok"}
+    # Auto-apply: if this company's pipeline is running, queue a restart so the
+    # new zone takes effect without a manual Restart on the Pipeline page.
+    job = await pipeline_service.enqueue_restart_on_change(p.company_id)
+    return {"status": "ok", "restart_queued": bool(job)}
 
 
 @router.delete("/{cid}")

@@ -12,6 +12,7 @@ The web app never runs docker. Two signals are combined here:
 """
 import json
 import asyncio
+import datetime
 
 import httpx
 
@@ -159,3 +160,38 @@ async def fleet_status() -> dict:
                     "cameras_live": cams_live},
         "pipelines": pipelines,
     }
+
+
+async def enqueue_restart_on_change(company_id) -> int | None:
+    """Queue a pipeline RESTART for a company so a config change (e.g. a freshly
+    drawn detection zone) takes effect automatically — but only if its pipeline is
+    currently running (never auto-start a stopped one). Deduped against an already
+    pending/running job. Returns the job id, or None if nothing was queued."""
+    comp = await database.fetch_one(
+        companies.select().where(companies.c.company_id == str(company_id)))
+    if not comp:
+        return None
+    user = comp["admin_username"]
+    idx = await company_index(company_id)
+    # Running? Live health port first; fall back to the agent's container list.
+    running = (await fetch_health(idx)).get("available")
+    if not running:
+        agent = await agent_state()
+        cont = next((c for c in agent.get("containers", [])
+                     if c.get("name") == f"deepstream-{user}"), None)
+        running = bool(cont and cont.get("state") == "running")
+    if not running:
+        return None
+    # Dedupe: don't pile up restarts if one is already queued/running.
+    existing = await database.fetch_one(
+        pipeline_jobs.select().where(
+            (pipeline_jobs.c.username == user)
+            & (pipeline_jobs.c.action != "stop")
+            & (pipeline_jobs.c.status.in_(["pending", "running"])))
+        .order_by(pipeline_jobs.c.id.desc()))
+    if existing:
+        return existing["id"]
+    now = datetime.datetime.now()
+    return await database.execute(pipeline_jobs.insert().values(
+        company_id=str(company_id), username=user, action="restart",
+        idx=idx, status="pending", created_at=now, updated_at=now))
