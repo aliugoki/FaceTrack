@@ -1,0 +1,23 @@
+# OPTIONAL wrapper so `systemctl {start,stop,restart} facetrack` controls the
+# dashboard container. The compose file already has `restart: always`, so the
+# app survives reboots WITHOUT this unit — install it only if you want the
+# dashboard's lifecycle managed alongside the agent from one place (systemctl).
+#
+# install-agent.sh --with-app substitutes the __PLACEHOLDERS__.
+[Unit]
+Description=FaceTrack dashboard (docker compose)
+Requires=docker.service
+After=docker.service network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=__REPO_DIR__
+# --build keeps the image in sync with the checked-out code on every start.
+ExecStart=/usr/bin/docker compose up -d --build
+ExecStop=/usr/bin/docker compose down
+User=__USER__
+
+[Install]
+WantedBy=multi-user.target
