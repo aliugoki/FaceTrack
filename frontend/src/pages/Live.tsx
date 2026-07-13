@@ -41,11 +41,26 @@ function Player({ cam, online }: { cam: any; online: boolean }) {
   )
 }
 
+function CameraTile({ cam, online }: { cam: any; online: boolean }) {
+  return (
+    <div className="border border-line rounded-lg overflow-hidden">
+      <div className="px-3 py-2 flex justify-between items-center border-b border-line">
+        <b>{cam.name}</b>
+        <span className="text-xs text-muted">{cam.location || cam.type}</span>
+      </div>
+      <div className="aspect-video bg-black"><Player cam={cam} online={online} /></div>
+    </div>
+  )
+}
+
+const GRID = { gridTemplateColumns: 'repeat(auto-fill,minmax(360px,1fr))' } as const
+
 export default function Live() {
   const { can } = useAuth()
   const isFleet = can('view_tenants')              // super-admin sees the whole fleet
   const [cams, setCams] = useState<any[] | null>(null)
   const [liveUsers, setLiveUsers] = useState<Set<string> | null>(null)
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     api('/api/cameras/live')
@@ -76,17 +91,49 @@ export default function Live() {
   if (!cams.length)
     return <Card title="Live wall"><p className="text-muted text-sm">No cameras configured. Add them in <b>Cameras</b> with an RTSP source — HLS/WebRTC stream URLs are generated automatically.</p></Card>
 
+  // Company users: flat grid of their own cameras (unchanged).
+  if (!isFleet)
+    return (
+      <div className="grid gap-4" style={GRID}>
+        {cams.map((c) => <CameraTile key={c.id} cam={c} online={isOnline(c)} />)}
+      </div>
+    )
+
+  // Super-admins: group by company into collapsible sections so a company's
+  // cameras aren't mixed together across the whole fleet.
+  const groups = new Map<string, any[]>()
+  for (const c of cams) {
+    const key = c.company_name || '—'
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key)!.push(c)
+  }
+  const toggle = (name: string) => setCollapsed((prev) => {
+    const s = new Set(prev); s.has(name) ? s.delete(name) : s.add(name); return s
+  })
+
   return (
-    <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill,minmax(360px,1fr))' }}>
-      {cams.map((c) => (
-        <div key={c.id} className="card overflow-hidden">
-          <div className="px-4 py-2.5 flex justify-between items-center border-b border-line">
-            <b>{c.company_name ? `${c.company_name} · ${c.name}` : c.name}</b>
-            <span className="text-xs text-muted">{c.location || c.type}</span>
+    <div className="flex flex-col gap-4">
+      {[...groups.entries()].map(([company, list]) => {
+        const isCol = collapsed.has(company)
+        const liveCount = list.filter(isOnline).length
+        return (
+          <div key={company} className="card overflow-hidden">
+            <button onClick={() => toggle(company)}
+              className="w-full px-4 py-3 flex justify-between items-center border-b border-line hover:bg-surface2">
+              <b>{company} <span className="text-muted font-normal text-sm">· {list.length} camera{list.length !== 1 ? 's' : ''}</span></b>
+              <span className="text-xs text-muted">
+                <span className={liveCount ? 'text-ok' : ''}>{liveCount}/{list.length} live</span>
+                <span className="ml-2">{isCol ? '▸' : '▾'}</span>
+              </span>
+            </button>
+            {!isCol && (
+              <div className="p-4 grid gap-4" style={GRID}>
+                {list.map((c) => <CameraTile key={c.id} cam={c} online={isOnline(c)} />)}
+              </div>
+            )}
           </div>
-          <div className="aspect-video bg-black"><Player cam={c} online={isOnline(c)} /></div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }

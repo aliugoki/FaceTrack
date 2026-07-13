@@ -128,15 +128,23 @@ async def add_entry(company_id: str, emp_id: str, first_name: str, last_name: st
                       last_name=last_name, attendance_time=now, attendance_date=now.date(),
                       check_type="in", image_url=img, status=status_v)
     elif ct == "out":
-        open_in = await database.fetch_one(select(attendance.c.id).where(
-            (attendance.c.company_id == company_id) & (attendance.c.check_type == "in")
-            & (attendance.c.check_in_id.is_(None)) & (attendance.c.emp_id == str(emp_id)))
+        open_in = await database.fetch_one(
+            select(attendance.c.id, attendance.c.attendance_time).where(
+                (attendance.c.company_id == company_id) & (attendance.c.check_type == "in")
+                & (attendance.c.check_in_id.is_(None)) & (attendance.c.emp_id == str(emp_id)))
             .order_by(attendance.c.attendance_time.desc()).limit(1))
         if not open_in:
             return None
+        # Checkout status from tenant policy: Present / Left Early / Half Day / Overtime.
+        from app.modules.settings import service as policy_svc
+        policy = await policy_svc.get_settings(company_id)
+        check_in_dt = open_in["attendance_time"]
+        if isinstance(check_in_dt, datetime.time):
+            check_in_dt = datetime.datetime.combine(now.date(), check_in_dt)
+        status_v, _worked = policy_svc.classify_checkout(check_in_dt, now, policy)
         values = dict(company_id=company_id, emp_id=str(emp_id), first_name=first_name,
                       last_name=last_name, attendance_time=now, attendance_date=now.date(),
-                      check_type="out", check_in_id=open_in["id"], image_url=img, status="Exit")
+                      check_type="out", check_in_id=open_in["id"], image_url=img, status=status_v)
     else:
         return None
 

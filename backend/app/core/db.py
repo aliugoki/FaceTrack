@@ -8,7 +8,7 @@ import logging
 
 from databases import Database
 from sqlalchemy import (MetaData, Table, Column, String, Integer, DateTime,
-                        Date, Boolean)
+                        Date, Boolean, Float)
 
 from app.core.config import settings
 
@@ -99,6 +99,24 @@ tenant_settings = Table(
     Column("grace_minutes", Integer, default=0),
     Column("workdays", String, default="1,2,3,4,5"),   # ISO weekday 1=Mon..7=Sun
     Column("timezone", String, default="Asia/Karachi"),
+    # Shift end + optional unpaid break window (HH:MM). break_* NULL = no break.
+    Column("end_time", String, default="18:00"),
+    Column("break_start", String, nullable=True),
+    Column("break_end", String, nullable=True),
+    # Threshold-based status classification (all in minutes).
+    Column("early_leave_grace_minutes", Integer, default=0),
+    Column("half_day_after_minutes", Integer, default=240),
+    Column("min_work_minutes", Integer, default=0),
+    Column("overtime_after_minutes", Integer, default=0),   # 0 = overtime disabled
+    # Recordings retention in days: NULL = MediaMTX default (48h), 0 = keep forever.
+    Column("recordings_retention_days", Integer, nullable=True),
+    # Per-company face-recognition tuning (fed into the pipeline config at launch):
+    #   rec_threshold  cosine match cutoff (higher = stricter, fewer false matches)
+    #   rec_margin     min gap best vs 2nd-best (guards ambiguous look-alikes)
+    #   rec_min_votes  consecutive frames before an identity is committed
+    Column("rec_threshold", Float, default=0.35),
+    Column("rec_margin", Float, default=0.05),
+    Column("rec_min_votes", Integer, default=3),
     Column("updated_at", DateTime, default=datetime.datetime.now),
 )
 
@@ -169,6 +187,23 @@ async def connect_and_init():
         company_id TEXT PRIMARY KEY, start_time TEXT DEFAULT '09:00',
         grace_minutes INTEGER DEFAULT 0, workdays TEXT DEFAULT '1,2,3,4,5',
         timezone TEXT DEFAULT 'Asia/Karachi', updated_at TIMESTAMP DEFAULT now())""")
+    # Additive: enterprise policy fields (shift end, break window, thresholds, retention).
+    # recordings_retention_days stays NULL for existing rows -> generator keeps 48h default.
+    for _col, _type in (
+        ("end_time", "TEXT DEFAULT '18:00'"),
+        ("break_start", "TEXT"),
+        ("break_end", "TEXT"),
+        ("early_leave_grace_minutes", "INTEGER DEFAULT 0"),
+        ("half_day_after_minutes", "INTEGER DEFAULT 240"),
+        ("min_work_minutes", "INTEGER DEFAULT 0"),
+        ("overtime_after_minutes", "INTEGER DEFAULT 0"),
+        ("recordings_retention_days", "INTEGER"),
+        ("rec_threshold", "REAL DEFAULT 0.35"),
+        ("rec_margin", "REAL DEFAULT 0.05"),
+        ("rec_min_votes", "INTEGER DEFAULT 3"),
+    ):
+        await database.execute(
+            f"ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS {_col} {_type}")
     await database.execute("""CREATE TABLE IF NOT EXISTS holidays (
         id SERIAL PRIMARY KEY, company_id TEXT, day DATE NOT NULL, name TEXT)""")
     await database.execute("""CREATE TABLE IF NOT EXISTS pipeline_jobs (

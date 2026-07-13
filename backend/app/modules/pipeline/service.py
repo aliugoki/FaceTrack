@@ -195,3 +195,35 @@ async def enqueue_restart_on_change(company_id) -> int | None:
     return await database.execute(pipeline_jobs.insert().values(
         company_id=str(company_id), username=user, action="restart",
         idx=idx, status="pending", created_at=now, updated_at=now))
+
+
+async def enqueue_stop(username, company_id="") -> int:
+    """Queue a stop job for a company's pipeline (e.g. when a tenant is deleted).
+    Keyed by username, which is all the agent needs to `docker rm -f` the container."""
+    now = datetime.datetime.now()
+    return await database.execute(pipeline_jobs.insert().values(
+        company_id=str(company_id), username=username, action="stop",
+        idx=0, status="pending", created_at=now, updated_at=now))
+
+
+async def enqueue_mediamtx_sync(company_id) -> int | None:
+    """Queue a MediaMTX config sync so a recordings-retention change takes effect:
+    the agent regenerates the paths block (per-company ``recordDeleteAfter`` from the
+    DB) and MediaMTX hot-reloads — no pipeline restart, no feed interruption. The sync
+    is global (rewrites every path), so it dedupes against ANY pending/running sync,
+    not per-company. Returns the job id, or None if the company is unknown."""
+    comp = await database.fetch_one(
+        companies.select().where(companies.c.company_id == str(company_id)))
+    if not comp:
+        return None
+    existing = await database.fetch_one(
+        pipeline_jobs.select().where(
+            (pipeline_jobs.c.action == "mediamtx_sync")
+            & (pipeline_jobs.c.status.in_(["pending", "running"])))
+        .order_by(pipeline_jobs.c.id.desc()))
+    if existing:
+        return existing["id"]
+    now = datetime.datetime.now()
+    return await database.execute(pipeline_jobs.insert().values(
+        company_id=str(company_id), username=comp["admin_username"], action="mediamtx_sync",
+        idx=0, status="pending", created_at=now, updated_at=now))
