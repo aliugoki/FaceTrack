@@ -369,19 +369,14 @@ of `companies`/`user_data`/`attendance1`/`attendance_logs`.)
 ```bash
 cd /home/meta/deploy/deepstream
 docker build -t deepstream-facepipe:latest -f Dockerfile.facepipe .   # GPU-agnostic image
-# ArcFace engine (loaded directly by the pipeline — no auto-rebuild):
-docker run --rm --gpus all -v "$PWD/models":/m deepstream-facepipe:latest \
-  trtexec --onnx=/m/arcface/arcface.onnx --saveEngine=/m/arcface/arc1.engine --fp16
-# YOLO face: drop the stale engine — DeepStream rebuilds it from the onnx on first launch:
-rm -f models/yolov8n_face/yolov8n-face2.engine
+./tools/rebuild-engines.sh --enroll                                    # rebuild engines + re-enroll galleries
 ```
-Then **re-enroll the gallery** so embeddings match this machine (aligned; ONNX and TRT
-agree ~0.9999, so `--embedder onnx` is fine and portable):
-```bash
-docker run --rm --gpus all -v "$PWD":/workspace -v "$COMPANY_IMAGES_ROOT/<folder>":/gallery \
-  -w /workspace --entrypoint bash deepstream-facepipe:latest \
-  -c "pip install -q onnxruntime && python3 tools/enroll.py --all --known-dir /gallery --embedder onnx"
-```
+`rebuild-engines.sh` rebuilds the **ArcFace** engine (`arc1.engine`) with the correct
+dynamic-batch profile for this GPU, drops the stale **YOLO** engine (DeepStream
+rebuilds it from ONNX on first launch), and — with `--enroll` — re-enrolls every
+gallery under `COMPANY_IMAGES_ROOT` using the portable aligned ONNX embedder (ONNX and
+TRT vectors agree ~0.9999). Omit `--enroll` to only rebuild the engines. Prereq: the
+`deepstream-facepipe:latest` image (built above) and a working GPU under docker.
 
 ### 6. Deploy the dashboard
 ```bash
