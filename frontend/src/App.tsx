@@ -13,6 +13,7 @@ import Tenants from './pages/Tenants'
 import Settings from './pages/Settings'
 import Audit from './pages/Audit'
 import Live from './pages/Live'
+import LiveBoard from './pages/LiveBoard'
 import Cameras from './pages/Cameras'
 import Companies from './pages/Companies'
 import Recordings from './pages/Recordings'
@@ -33,6 +34,7 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route element={<Protected><Layout /></Protected>}>
           <Route index element={<Overview />} />
+          <Route path="board" element={<LiveBoard />} />
           <Route path="live" element={<Live />} />
           <Route path="cameras" element={<Cameras />} />
           <Route path="recordings" element={<Recordings />} />
