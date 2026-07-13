@@ -317,6 +317,105 @@ localhost or the private network between the two hosts.
 
 ---
 
+## 12. Moving to another server (different GPU / specs)
+
+Almost everything is portable. **The one GPU-specific part:** the TensorRT `.engine`
+files (ArcFace `arc1.engine`, YOLO `yolov8n-face2.engine`) are compiled for a specific
+GPU and **must be rebuilt** on the new machine — otherwise recognition silently fails.
+Everything else is a normal install.
+
+### 1. Prerequisites (new machine, Ubuntu 22.04+)
+Same as §2: NVIDIA driver **535+** (DeepStream 7.1 needs CUDA 12.x — `nvidia-smi`),
+Docker + compose, **nvidia-container-toolkit** (`docker info | grep -i nvidia`),
+PostgreSQL 15+, `python3` + `python3-requests`, and nginx/certbot if you want TLS.
+
+### 2. Get both repos (keep the same base path — scripts hardcode it)
+Several pipeline scripts hardcode `/home/meta/deploy/...`. The easy path is to
+replicate that layout (the folder doesn't need a `meta` user — it's just a path):
+```bash
+sudo mkdir -p /home/meta/deploy && sudo chown "$USER" /home/meta/deploy
+cd /home/meta/deploy
+git clone <FaceTrack repo>  attendance-system
+git clone <DeepStream repo> deepstream
+mkdir -p /home/meta/deploy/test/data/company_images /home/meta/deploy/test/models
+sudo mkdir -p /opt/mediamtx/recordings
+```
+> Using a different base path? Then rewrite it everywhere first:
+> `grep -rl /home/meta/deploy deepstream/tools attendance-system/docker-compose.yml | xargs sed -i 's#/home/meta/deploy#/your/base#g'`
+
+Copy the **models** (`arcface.onnx`, `myyolo.onnx`, res10, YuNet) into
+`deepstream/models/` and your **face gallery** into `COMPANY_IMAGES_ROOT`, from the old
+server or your model store (large binaries may not be in git).
+
+### 3. Database — bring your data across
+```bash
+# OLD server:
+pg_dump -Fc facial_recognition_db > facetrack.dump
+# NEW server (after copying the file):
+createdb facial_recognition_db
+pg_restore -d facial_recognition_db facetrack.dump
+```
+The dump carries `companies`, `user_data`, and attendance; the dashboard
+auto-creates/migrates its own tables (`tenant_settings`, `cameras`, `pipeline_jobs`, …)
+on first start. (Fresh start instead? Create the DB and load a `pg_dump --schema-only`
+of `companies`/`user_data`/`attendance1`/`attendance_logs`.)
+
+### 4. Configure `backend/.env`
+`cp backend/.env.example backend/.env` and fill in `DATABASE_URL`, `SECRET_KEY`
+(`openssl rand -hex 32`), `SUPERADMIN_USERS`, `AGENT_TOKEN` (`openssl rand -hex 24`),
+`COMPANY_IMAGES_ROOT` (see §3 of the config table).
+
+### 5. ⚙️ Rebuild the TensorRT engines for the new GPU  ← the key step
+```bash
+cd /home/meta/deploy/deepstream
+docker build -t deepstream-facepipe:latest -f Dockerfile.facepipe .   # GPU-agnostic image
+# ArcFace engine (loaded directly by the pipeline — no auto-rebuild):
+docker run --rm --gpus all -v "$PWD/models":/m deepstream-facepipe:latest \
+  trtexec --onnx=/m/arcface/arcface.onnx --saveEngine=/m/arcface/arc1.engine --fp16
+# YOLO face: drop the stale engine — DeepStream rebuilds it from the onnx on first launch:
+rm -f models/yolov8n_face/yolov8n-face2.engine
+```
+Then **re-enroll the gallery** so embeddings match this machine (aligned; ONNX and TRT
+agree ~0.9999, so `--embedder onnx` is fine and portable):
+```bash
+docker run --rm --gpus all -v "$PWD":/workspace -v "$COMPANY_IMAGES_ROOT/<folder>":/gallery \
+  -w /workspace --entrypoint bash deepstream-facepipe:latest \
+  -c "pip install -q onnxruntime && python3 tools/enroll.py --all --known-dir /gallery --embedder onnx"
+```
+
+### 6. Deploy the dashboard
+```bash
+cd /home/meta/deploy/attendance-system
+./deploy/preflight.sh     # verifies driver, docker, GPU runtime, DB, env
+./deploy/deploy.sh app    # builds + runs the dashboard on :5002
+```
+
+### 7. Install the agent as a systemd service
+```bash
+sudo ./deploy/install-agent.sh          # installs + enables facetrack-agent, syncs AGENT_TOKEN
+systemctl status facetrack-agent
+journalctl -u facetrack-agent -f
+```
+Optionally manage the dashboard under systemd too with
+`deploy/systemd/facetrack.service` (the compose file already has `restart: always`, so
+this is only for single-point `systemctl` control).
+
+### 8. MediaMTX (recordings + live playback)
+```bash
+docker run -d --name mediamtx --restart always --network host \
+  -v /home/meta/deploy/mediamtx.yml:/mediamtx.yml \
+  -v /opt/mediamtx/recordings:/recordings bluenviron/mediamtx:latest
+```
+Copy a base `mediamtx.yml` from the old server; the agent regenerates its `paths:` block.
+
+### 9. TLS / nginx & first run
+Do §7 (certbot + the vhost) for HTTPS (required for webcam enrollment), then §8 —
+sign in, **Pipeline → Start** a company, watch health go green, confirm on **Live
+Attendance**. If faces aren't recognized after the move, you skipped step 5 (rebuild
+engines + re-enroll).
+
+---
+
 ## Files added for deployment
 
 ```
