@@ -52,6 +52,9 @@ flowchart LR
 
 ## Architecture
 
+> For the full **two-repo system architecture** (FaceTrack dashboard + DeepStream
+> GPU pipeline, and how they connect), see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+
 ```
 backend/app/
   core/        config · db (tables) · security (RBAC) · deps (auth)
