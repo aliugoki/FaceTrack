@@ -19,6 +19,12 @@ class CameraIn(BaseModel):
     webrtc_url: str | None = None
     enabled: bool = True
     detection_area: list | None = None   # polygon [[x,y],...] normalized 0..1
+    # NVR access (Hikvision) — for gap backfill when the live stream drops.
+    nvr_host: str | None = None
+    nvr_port: int | None = None
+    nvr_user: str | None = None
+    nvr_password: str | None = None
+    nvr_channel: int | None = None
 
 
 class AreaIn(BaseModel):

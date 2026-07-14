@@ -133,10 +133,11 @@ pipeline_jobs = Table(
     Column("id", Integer, primary_key=True),
     Column("company_id", String, index=True),
     Column("username", String),
-    Column("action", String, default="start"),     # start | stop
+    Column("action", String, default="start"),     # start|stop|restart|mediamtx_sync|backfill
     Column("idx", Integer, default=0),
     Column("status", String, default="pending"),    # pending | running | done | failed
     Column("log", String, nullable=True),
+    Column("payload", String, nullable=True),        # JSON extras (e.g. backfill params)
     Column("created_at", DateTime, default=datetime.datetime.now),
     Column("updated_at", DateTime, default=datetime.datetime.now),
 )
@@ -156,6 +157,28 @@ cameras = Table(
     # Attendance only triggers inside it; null/empty = whole frame. Drawn per
     # camera in the dashboard; consumed by deepstream/tools/gen_company_config.py.
     Column("detection_area", String, nullable=True),
+    # NVR access for gap backfill (Hikvision ISAPI). When the live stream drops,
+    # the on-site NVR keeps recording; we fetch the missed window from here.
+    Column("nvr_host", String, nullable=True),
+    Column("nvr_port", Integer, nullable=True),      # ISAPI/HTTP port (default 80)
+    Column("nvr_user", String, nullable=True),
+    Column("nvr_password", String, nullable=True),
+    Column("nvr_channel", Integer, nullable=True),   # NVR channel number (1-based)
+    Column("created_at", DateTime, default=datetime.datetime.now),
+)
+
+# Detected live-stream outages per camera. A background monitor opens a row when a
+# source goes stale and closes it (sets ended_at) when frames resume; on close a
+# backfill job is queued to pull + reprocess the missed footage from the NVR.
+stream_gaps = Table(
+    "stream_gaps", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("company_id", String, index=True),
+    Column("camera_id", Integer, nullable=True),
+    Column("camera_name", String, nullable=True),
+    Column("started_at", DateTime, nullable=False),
+    Column("ended_at", DateTime, nullable=True),          # null = still down
+    Column("status", String, default="open"),             # open|queued|done|failed|skipped
     Column("created_at", DateTime, default=datetime.datetime.now),
 )
 
@@ -217,6 +240,16 @@ async def connect_and_init():
     # Additive: per-camera detection zone (JSON polygon, normalized 0..1).
     await database.execute(
         "ALTER TABLE cameras ADD COLUMN IF NOT EXISTS detection_area TEXT")
+    # Additive: per-camera NVR access (for gap backfill) + the gaps ledger + a
+    # generic job payload (backfill params: camera/channel/time-range).
+    for _c, _t in (("nvr_host", "TEXT"), ("nvr_port", "INTEGER"), ("nvr_user", "TEXT"),
+                   ("nvr_password", "TEXT"), ("nvr_channel", "INTEGER")):
+        await database.execute(f"ALTER TABLE cameras ADD COLUMN IF NOT EXISTS {_c} {_t}")
+    await database.execute("""CREATE TABLE IF NOT EXISTS stream_gaps (
+        id SERIAL PRIMARY KEY, company_id TEXT, camera_id INTEGER, camera_name TEXT,
+        started_at TIMESTAMP NOT NULL, ended_at TIMESTAMP, status TEXT DEFAULT 'open',
+        created_at TIMESTAMP DEFAULT now())""")
+    await database.execute("ALTER TABLE pipeline_jobs ADD COLUMN IF NOT EXISTS payload TEXT")
     await database.execute("""CREATE TABLE IF NOT EXISTS pipeline_agent_state (
         id INTEGER PRIMARY KEY, payload TEXT, updated_at TIMESTAMP DEFAULT now())""")
 

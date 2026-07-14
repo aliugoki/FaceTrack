@@ -178,7 +178,8 @@ async def agent_jobs(token: str = ""):
         raise HTTPException(403, "invalid agent token")
     rows = await database.fetch_all(
         pipeline_jobs.select().where(pipeline_jobs.c.status == "pending").order_by(pipeline_jobs.c.id))
-    return [{"id": r["id"], "username": r["username"], "action": r["action"], "index": r["idx"]} for r in rows]
+    return [{"id": r["id"], "username": r["username"], "action": r["action"], "index": r["idx"],
+             "payload": r["payload"]} for r in rows]
 
 
 class AgentUpdate(BaseModel):

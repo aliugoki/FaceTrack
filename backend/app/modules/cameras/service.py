@@ -17,7 +17,8 @@ import json
 from sqlalchemy import delete
 from app.core.db import database, cameras, companies
 
-FIELDS = ("name", "location", "type", "rtsp_url", "hls_url", "webrtc_url", "enabled")
+FIELDS = ("name", "location", "type", "rtsp_url", "hls_url", "webrtc_url", "enabled",
+          "nvr_host", "nvr_port", "nvr_user", "nvr_password", "nvr_channel")
 
 
 def _eligible(r):

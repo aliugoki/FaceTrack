@@ -67,6 +67,12 @@ export default function Cameras() {
             {showAdv && <>
               <input className="input md:col-span-3" placeholder="HLS URL override (leave blank for auto)" value={form.hls_url || ''} onChange={(e) => setForm({ ...form, hls_url: e.target.value })} />
               <input className="input md:col-span-3" placeholder="WebRTC URL override (leave blank for auto)" value={form.webrtc_url || ''} onChange={(e) => setForm({ ...form, webrtc_url: e.target.value })} />
+              <div className="md:col-span-3 text-xs uppercase tracking-wide text-muted mt-1">NVR (Hikvision) — for gap backfill</div>
+              <input className="input" placeholder="NVR host/IP" value={form.nvr_host || ''} onChange={(e) => setForm({ ...form, nvr_host: e.target.value })} />
+              <input className="input" type="number" placeholder="Port (80)" value={form.nvr_port ?? ''} onChange={(e) => setForm({ ...form, nvr_port: e.target.value === '' ? null : Number(e.target.value) })} />
+              <input className="input" type="number" placeholder="Channel #" value={form.nvr_channel ?? ''} onChange={(e) => setForm({ ...form, nvr_channel: e.target.value === '' ? null : Number(e.target.value) })} />
+              <input className="input" placeholder="NVR username" value={form.nvr_user || ''} onChange={(e) => setForm({ ...form, nvr_user: e.target.value })} />
+              <input className="input" type="password" placeholder="NVR password" value={form.nvr_password || ''} onChange={(e) => setForm({ ...form, nvr_password: e.target.value })} />
             </>}
 
             <div className="md:col-span-3 flex gap-2">
