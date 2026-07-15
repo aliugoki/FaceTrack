@@ -8,11 +8,15 @@ heartbeat). See service.py for the status/health logic.
 """
 import datetime
 import json
+import os
+import re
+import uuid
 
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from sqlalchemy import and_
 
+from app.core.config import settings
 from app.core.db import database, cameras, companies, pipeline_jobs, stream_gaps
 from app.core.deps import Principal, require
 from app.modules.audit import service as audit
@@ -260,6 +264,62 @@ async def backfill(body: BackfillIn, p: Principal = Depends(require("manage_tena
     await audit.record(p.company_id, p.actor, p.role, "pipeline.backfill",
                        f'{cam["name"]} [{body.start.isoformat()} -> {body.end.isoformat()}]')
     return {"job_id": jid, "gap_id": gap_id, "status": "pending"}
+
+
+# Uploaded-clip reprocessing — the file lands in CAPTURES_DIR/backfill_uploads, which
+# is bind-mounted to the host so the pipeline agent can mount it into DeepStream and
+# reprocess it unthrottled (run_backfill_file.sh). Attendance is stamped from clip_start.
+UPLOAD_SUBDIR = "backfill_uploads"
+_ALLOWED_EXT = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".ts", ".h264"}
+_MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
+
+
+@router.post("/backfill/upload")
+async def backfill_upload(
+    file: UploadFile = File(...),
+    company: str = Form(..., description="company admin_username"),
+    clip_start: datetime.datetime = Form(..., description="real-world time the footage begins"),
+    camera_id: int | None = Form(None),
+    p: Principal = Depends(require("manage_tenants")),
+):
+    """Upload a recorded clip and queue a high-speed offline reprocess (no NVR needed)."""
+    row = await _resolve_company(company)
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in _ALLOWED_EXT:
+        raise HTTPException(400, f"unsupported type '{ext}' (allowed: {sorted(_ALLOWED_EXT)})")
+    up_dir = os.path.join(settings.CAPTURES_DIR, UPLOAD_SUBDIR)
+    os.makedirs(up_dir, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(file.filename or f"clip{ext}"))
+    fname = f"{uuid.uuid4().hex}_{safe}"
+    dest = os.path.join(up_dir, fname)
+    size = 0
+    try:
+        with open(dest, "wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > _MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, "file too large (max 2 GB)")
+                out.write(chunk)
+    except Exception:
+        if os.path.exists(dest):
+            os.remove(dest)
+        raise
+    cid = str(row["company_id"])
+    now = datetime.datetime.now()
+    gap_id = await database.execute(stream_gaps.insert().values(
+        company_id=cid, camera_id=camera_id, camera_name=f"upload:{safe}",
+        started_at=clip_start, ended_at=None, status="queued", created_at=now))
+    payload = json.dumps({
+        "gap_id": gap_id, "upload": True, "filename": fname,
+        "clip_start": clip_start.isoformat(), "camera_id": camera_id, "manual": True,
+    })
+    jid = await database.execute(pipeline_jobs.insert().values(
+        company_id=cid, username=company, action="backfill",
+        idx=await service.company_index(row["company_id"]),
+        status="pending", payload=payload, created_at=now, updated_at=now))
+    await audit.record(p.company_id, p.actor, p.role, "pipeline.backfill_upload",
+                       f"{company} {safe} ({size}B) clip_start={clip_start.isoformat()}")
+    return {"job_id": jid, "gap_id": gap_id, "status": "pending", "filename": fname, "bytes": size}
 
 
 # --------------------------------------------------------------------------- #

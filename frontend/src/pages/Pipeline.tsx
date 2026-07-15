@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api } from '../lib/api'
+import { api, getToken } from '../lib/api'
 import { Card, Kpi, Spinner, toast } from '../components/ui'
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -161,6 +161,10 @@ export default function Pipeline() {
   const [bfCam, setBfCam] = useState<number | ''>('')
   const [bfStart, setBfStart] = useState('')
   const [bfEnd, setBfEnd] = useState('')
+  // upload-clip backfill
+  const [upFile, setUpFile] = useState<File | null>(null)
+  const [upStart, setUpStart] = useState('')
+  const [upBusy, setUpBusy] = useState(false)
   const firstLoad = useRef(true)
 
   const loadFleet = () => api('/api/pipeline/status').then((f) => { setFleet(f); firstLoad.current = false }).catch(() => {})
@@ -200,6 +204,24 @@ export default function Pipeline() {
       toast('Backfill queued — the host agent will reprocess from the NVR', 'ok')
       loadJobs(); loadGaps()
     } catch (e: any) { toast(e.message || 'Failed', 'err') }
+  }
+  const uploadBackfill = async () => {
+    if (!upFile || !upStart || !bfCompany) { toast('Pick a company, a clip and its start time', 'err'); return }
+    const fd = new FormData()
+    fd.append('file', upFile)
+    fd.append('company', bfCompany)
+    fd.append('clip_start', upStart)
+    if (bfCam) fd.append('camera_id', String(bfCam))
+    setUpBusy(true)
+    try {
+      const res = await fetch('/api/pipeline/backfill/upload', {
+        method: 'POST', headers: { Authorization: `Bearer ${getToken()}` }, body: fd,
+      })
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || res.statusText) }
+      toast('Clip uploaded — queued for high-speed reprocess', 'ok')
+      setUpFile(null); loadJobs(); loadGaps()
+    } catch (e: any) { toast(e.message || 'Upload failed', 'err') }
+    finally { setUpBusy(false) }
   }
   const reprocess = async (g: any) => {
     if (!g.camera_id || !g.started_at || !g.ended_at) return
@@ -336,6 +358,21 @@ export default function Pipeline() {
           <button className="btn bg-brand/20 text-brand border-brand" onClick={queueBackfill}>⭱ Queue backfill</button>
         </div>
         <p className="text-xs text-muted mt-2">Pulls the window from the camera's NVR and reprocesses it <b>faster than real-time</b>, stamping attendance at the true recording time. Requires NVR credentials on the camera. Progress appears in <b>Launch jobs</b> below (action <code>backfill</code>).</p>
+
+        {/* upload a recorded clip (no NVR needed) */}
+        <div className="mt-3 bg-surface2 border border-line rounded-lg p-3 flex flex-wrap items-end gap-3">
+          <div>
+            <label className="text-[11px] text-muted block mb-1">Or upload a recorded clip</label>
+            <input type="file" accept="video/*,.mp4,.mkv,.avi,.mov,.m4v,.ts,.h264" className="text-sm"
+              onChange={(e) => setUpFile(e.target.files?.[0] || null)} />
+          </div>
+          <div>
+            <label className="text-[11px] text-muted block mb-1">Recording started at</label>
+            <input className="input" type="datetime-local" value={upStart} onChange={(e) => setUpStart(e.target.value)} />
+          </div>
+          <button className="btn" disabled={upBusy} onClick={uploadBackfill}>{upBusy ? 'Uploading…' : '⬆ Upload & reprocess'}</button>
+          <span className="text-[11px] text-muted">Uses the <b>Company</b> selected above · no NVR needed · attendance stamped from the start time</span>
+        </div>
 
         {/* detected gaps ledger */}
         <div className="mt-4">
