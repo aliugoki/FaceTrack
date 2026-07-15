@@ -240,6 +240,13 @@ async def backfill(body: BackfillIn, p: Principal = Depends(require("manage_tena
         raise HTTPException(400, "end must be after start")
     if (body.end - body.start).total_seconds() > 12 * 3600:
         raise HTTPException(400, "window too large (max 12h per backfill job)")
+    # Reject future windows: the NVR can't have recorded them, and the gap would
+    # otherwise be marked done over an empty fetch (misleading). Small skew allowed.
+    now = datetime.datetime.now()
+    if body.start > now + datetime.timedelta(minutes=1):
+        raise HTTPException(400, "start is in the future — no footage to reprocess")
+    if body.end > now + datetime.timedelta(minutes=1):
+        raise HTTPException(400, "end is in the future — clamp it to now")
     cam = await database.fetch_one(cameras.select().where(cameras.c.id == body.camera_id))
     if not cam:
         raise HTTPException(404, "camera not found")

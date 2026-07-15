@@ -174,7 +174,9 @@ export default function Pipeline() {
     if (!company) { setBfCams([]); setBfCam(''); return }
     api(`/api/pipeline/cameras?company=${encodeURIComponent(company)}`).then((cs: any) => {
       setBfCams(cs)
-      const first = cs.find((c: any) => c.nvr_configured) || cs[0]
+      // Only NVR-configured cameras can be backfilled; don't auto-select a
+      // disabled option (it would 400 on submit). Leave unselected otherwise.
+      const first = cs.find((c: any) => c.nvr_configured)
       setBfCam(first ? first.id : '')
     }).catch(() => {})
   }
@@ -355,7 +357,7 @@ export default function Pipeline() {
             <label className="text-[11px] text-muted block mb-1">To</label>
             <input className="input" type="datetime-local" value={bfEnd} onChange={(e) => setBfEnd(e.target.value)} />
           </div>
-          <button className="btn bg-brand/20 text-brand border-brand" onClick={queueBackfill}>⭱ Queue backfill</button>
+          <button className="btn bg-brand/20 text-brand border-brand" disabled={!bfCam} onClick={queueBackfill}>⭱ Queue backfill</button>
         </div>
         <p className="text-xs text-muted mt-2">Pulls the window from the camera's NVR and reprocesses it <b>faster than real-time</b>, stamping attendance at the true recording time. Requires NVR credentials on the camera. Progress appears in <b>Launch jobs</b> below (action <code>backfill</code>).</p>
 
@@ -382,7 +384,10 @@ export default function Pipeline() {
               <thead className="bg-surface2 text-muted"><tr>{['Company', 'Camera', 'Down from', 'Recovered', 'Duration', 'Status', ''].map((h) => <th key={h} className="text-left px-3 py-2 font-semibold">{h}</th>)}</tr></thead>
               <tbody>
                 {gaps.map((g) => {
+                  // Only offer Reprocess for gaps that need it (failed/skipped) —
+                  // re-running a 'done' gap would double-post attendance for the window.
                   const canReprocess = g.camera_id && g.started_at && g.ended_at
+                    && ['failed', 'skipped'].includes(g.status)
                   return (
                     <tr key={g.id} className="border-b border-line/50">
                       <td className="px-3 py-2">{g.company}</td>
