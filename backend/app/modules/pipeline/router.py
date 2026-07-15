@@ -7,11 +7,13 @@ token-holding host agent executes and reports back on (plus a GPU/container
 heartbeat). See service.py for the status/health logic.
 """
 import datetime
+import json
 
 from fastapi import APIRouter, Depends, Query, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import and_
 
-from app.core.db import database, cameras, companies, pipeline_jobs
+from app.core.db import database, cameras, companies, pipeline_jobs, stream_gaps
 from app.core.deps import Principal, require
 from app.modules.audit import service as audit
 from app.modules.pipeline import service
@@ -161,6 +163,103 @@ async def jobs(p: Principal = Depends(require("manage_tenants"))):
              "status": r["status"], "log": r["log"],
              "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None}
             for r in rows]
+
+
+# --------------------------------------------------------------------------- #
+# Backfill / stream gaps — high-speed offline reprocessing (super-admin)
+#
+# The heavy lifting already exists: the gap monitor + the host agent's
+# run_backfill.sh pull the missed window from the NVR and reprocess it
+# UNTHROTTLED (file source, live-source=0) with correct timestamps. These
+# endpoints just surface the gap ledger and let an operator queue a backfill on
+# demand — for a detected outage window or any custom range.
+# --------------------------------------------------------------------------- #
+def _dur(a, b):
+    return (b - a).total_seconds() if a and b else None
+
+
+@router.get("/gaps")
+async def list_gaps(company: str | None = Query(None, description="filter by company admin_username"),
+                    status: str | None = Query(None, description="open|queued|done|failed|skipped"),
+                    limit: int = Query(50, ge=1, le=200),
+                    p: Principal = Depends(require("manage_tenants"))):
+    """Recent detected stream gaps (+ manual backfills), newest first."""
+    conds = []
+    if company:
+        row = await _resolve_company(company)
+        conds.append(stream_gaps.c.company_id == str(row["company_id"]))
+    if status:
+        conds.append(stream_gaps.c.status == status)
+    q = stream_gaps.select()
+    if conds:
+        q = q.where(and_(*conds))
+    rows = await database.fetch_all(q.order_by(stream_gaps.c.id.desc()).limit(limit))
+    comps = {str(c["company_id"]): c for c in await database.fetch_all(companies.select())}
+    out = []
+    for r in rows:
+        c = comps.get(str(r["company_id"]))
+        out.append({
+            "id": r["id"], "company_id": r["company_id"],
+            "company": c["company_name"] if c else r["company_id"],
+            "admin_username": c["admin_username"] if c else None,
+            "camera_id": r["camera_id"], "camera_name": r["camera_name"],
+            "started_at": r["started_at"].isoformat() if r["started_at"] else None,
+            "ended_at": r["ended_at"].isoformat() if r["ended_at"] else None,
+            "duration_sec": _dur(r["started_at"], r["ended_at"]),
+            "status": r["status"],
+        })
+    return out
+
+
+@router.get("/cameras")
+async def backfill_cameras(company: str = Query(..., description="company admin_username"),
+                           p: Principal = Depends(require("manage_tenants"))):
+    """Cameras for a company + whether each has NVR creds (required to backfill)."""
+    row = await _resolve_company(company)
+    rows = await database.fetch_all(
+        cameras.select().where(cameras.c.company_id == str(row["company_id"]))
+        .order_by(cameras.c.name))
+    return [{"id": c["id"], "name": c["name"],
+             "nvr_configured": bool(c["nvr_host"] and c["nvr_channel"])} for c in rows]
+
+
+class BackfillIn(BaseModel):
+    camera_id: int
+    start: datetime.datetime
+    end: datetime.datetime
+
+
+@router.post("/backfill")
+async def backfill(body: BackfillIn, p: Principal = Depends(require("manage_tenants"))):
+    """Manually queue an NVR backfill for a camera + window (offline high-speed reprocess)."""
+    if body.end <= body.start:
+        raise HTTPException(400, "end must be after start")
+    if (body.end - body.start).total_seconds() > 12 * 3600:
+        raise HTTPException(400, "window too large (max 12h per backfill job)")
+    cam = await database.fetch_one(cameras.select().where(cameras.c.id == body.camera_id))
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    if not (cam["nvr_host"] and cam["nvr_channel"]):
+        raise HTTPException(400, "camera has no NVR configured — cannot backfill")
+    cid = str(cam["company_id"])
+    comp = await database.fetch_one(
+        companies.select().where(companies.c.company_id == cam["company_id"]))
+    now = datetime.datetime.now()
+    gap_id = await database.execute(stream_gaps.insert().values(
+        company_id=cid, camera_id=cam["id"], camera_name=cam["name"],
+        started_at=body.start, ended_at=body.end, status="queued", created_at=now))
+    payload = json.dumps({
+        "gap_id": gap_id, "camera_id": cam["id"], "camera_name": cam["name"],
+        "channel": cam["nvr_channel"], "start": body.start.isoformat(),
+        "end": body.end.isoformat(), "manual": True,
+    })
+    jid = await database.execute(pipeline_jobs.insert().values(
+        company_id=cid, username=comp["admin_username"] if comp else "",
+        action="backfill", idx=await service.company_index(cam["company_id"]),
+        status="pending", payload=payload, created_at=now, updated_at=now))
+    await audit.record(p.company_id, p.actor, p.role, "pipeline.backfill",
+                       f'{cam["name"]} [{body.start.isoformat()} -> {body.end.isoformat()}]')
+    return {"job_id": jid, "gap_id": gap_id, "status": "pending"}
 
 
 # --------------------------------------------------------------------------- #

@@ -19,6 +19,10 @@ const STATE_UI: Record<string, { label: string; cls: string; dot: string; pulse?
   unknown: { label: 'Unknown', cls: 'bg-surface2 text-muted', dot: 'bg-line' },
 }
 
+const GAP_UI: Record<string, string> = {
+  open: 'text-bad', queued: 'text-brand', done: 'text-ok', failed: 'text-bad', skipped: 'text-muted',
+}
+
 function StateBadge({ state }: { state: string }) {
   const u = STATE_UI[state] || STATE_UI.unknown
   return (
@@ -146,14 +150,30 @@ export default function Pipeline() {
   const [fleet, setFleet] = useState<any>(null)
   const [companies, setCompanies] = useState<any[]>([])
   const [jobs, setJobs] = useState<any[]>([])
+  const [gaps, setGaps] = useState<any[]>([])
   // provisioning
   const [pc, setPc] = useState('')          // provision company (admin_username)
   const [pIdx, setPIdx] = useState(0)
   const [d, setD] = useState<any>(null)
+  // backfill form
+  const [bfCompany, setBfCompany] = useState('')
+  const [bfCams, setBfCams] = useState<any[]>([])
+  const [bfCam, setBfCam] = useState<number | ''>('')
+  const [bfStart, setBfStart] = useState('')
+  const [bfEnd, setBfEnd] = useState('')
   const firstLoad = useRef(true)
 
   const loadFleet = () => api('/api/pipeline/status').then((f) => { setFleet(f); firstLoad.current = false }).catch(() => {})
   const loadJobs = () => api('/api/pipeline/jobs').then(setJobs).catch(() => {})
+  const loadGaps = () => api('/api/pipeline/gaps?limit=50').then(setGaps).catch(() => {})
+  const loadBfCams = (company: string) => {
+    if (!company) { setBfCams([]); setBfCam(''); return }
+    api(`/api/pipeline/cameras?company=${encodeURIComponent(company)}`).then((cs: any) => {
+      setBfCams(cs)
+      const first = cs.find((c: any) => c.nvr_configured) || cs[0]
+      setBfCam(first ? first.id : '')
+    }).catch(() => {})
+  }
   const provision = (comp = pc, i = pIdx) => {
     if (!comp) return
     setD(null)
@@ -163,12 +183,32 @@ export default function Pipeline() {
   useEffect(() => {
     api('/api/companies').then((cs: any) => {
       setCompanies(cs)
-      if (cs.length) { setPc(cs[0].admin_username); provision(cs[0].admin_username, 0) }
+      if (cs.length) {
+        setPc(cs[0].admin_username); provision(cs[0].admin_username, 0)
+        setBfCompany(cs[0].admin_username); loadBfCams(cs[0].admin_username)
+      }
     }).catch(() => {})
-    loadFleet(); loadJobs()
-    const t = setInterval(() => { loadFleet(); loadJobs() }, 5000)
+    loadFleet(); loadJobs(); loadGaps()
+    const t = setInterval(() => { loadFleet(); loadJobs(); loadGaps() }, 5000)
     return () => clearInterval(t)
   }, [])
+
+  const queueBackfill = async () => {
+    if (!bfCam || !bfStart || !bfEnd) { toast('Pick a camera and a time range', 'err'); return }
+    try {
+      await api('/api/pipeline/backfill', { method: 'POST', body: { camera_id: Number(bfCam), start: bfStart, end: bfEnd } })
+      toast('Backfill queued — the host agent will reprocess from the NVR', 'ok')
+      loadJobs(); loadGaps()
+    } catch (e: any) { toast(e.message || 'Failed', 'err') }
+  }
+  const reprocess = async (g: any) => {
+    if (!g.camera_id || !g.started_at || !g.ended_at) return
+    if (!confirm(`Reprocess ${g.camera_name} from ${new Date(g.started_at).toLocaleString()} to ${new Date(g.ended_at).toLocaleString()}?`)) return
+    try {
+      await api('/api/pipeline/backfill', { method: 'POST', body: { camera_id: g.camera_id, start: g.started_at, end: g.ended_at } })
+      toast('Backfill queued', 'ok'); loadJobs(); loadGaps()
+    } catch (e: any) { toast(e.message || 'Failed', 'err') }
+  }
 
   const doAction = async (company: string, action: string, index: number) => {
     try {
@@ -264,6 +304,64 @@ export default function Pipeline() {
             <p className="text-xs text-muted mt-2">Give each company a <b>distinct index</b> so ports don't collide. Launch from a pipeline card above (queued to the host agent — the dashboard never runs docker).</p>
           </>
         )}
+      </Card>
+
+      {/* ── backfill & offline reprocessing ── */}
+      <Card title="Backfill & offline reprocessing"
+        right={<span className="text-xs text-muted">high-speed NVR reprocess · auto-refreshes</span>}>
+        {/* manual trigger */}
+        <div className="bg-surface2 border border-line rounded-lg p-3 flex flex-wrap items-end gap-3">
+          <div>
+            <label className="text-[11px] text-muted block mb-1">Company</label>
+            <select className="input" value={bfCompany}
+              onChange={(e) => { setBfCompany(e.target.value); loadBfCams(e.target.value) }}>
+              {companies.map((c) => <option key={c.admin_username} value={c.admin_username}>{c.company_name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-[11px] text-muted block mb-1">Camera</label>
+            <select className="input" value={bfCam} onChange={(e) => setBfCam(Number(e.target.value))}>
+              {!bfCams.length && <option value="">No cameras</option>}
+              {bfCams.map((c) => <option key={c.id} value={c.id} disabled={!c.nvr_configured}>{c.name}{c.nvr_configured ? '' : ' (no NVR)'}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-[11px] text-muted block mb-1">From</label>
+            <input className="input" type="datetime-local" value={bfStart} onChange={(e) => setBfStart(e.target.value)} />
+          </div>
+          <div>
+            <label className="text-[11px] text-muted block mb-1">To</label>
+            <input className="input" type="datetime-local" value={bfEnd} onChange={(e) => setBfEnd(e.target.value)} />
+          </div>
+          <button className="btn bg-brand/20 text-brand border-brand" onClick={queueBackfill}>⭱ Queue backfill</button>
+        </div>
+        <p className="text-xs text-muted mt-2">Pulls the window from the camera's NVR and reprocesses it <b>faster than real-time</b>, stamping attendance at the true recording time. Requires NVR credentials on the camera. Progress appears in <b>Launch jobs</b> below (action <code>backfill</code>).</p>
+
+        {/* detected gaps ledger */}
+        <div className="mt-4">
+          <div className="text-xs text-muted mb-2 font-semibold uppercase tracking-wide">Detected stream gaps</div>
+          {!gaps.length ? <p className="text-muted text-sm">No stream gaps recorded.</p> : (
+            <table className="w-full text-sm">
+              <thead className="bg-surface2 text-muted"><tr>{['Company', 'Camera', 'Down from', 'Recovered', 'Duration', 'Status', ''].map((h) => <th key={h} className="text-left px-3 py-2 font-semibold">{h}</th>)}</tr></thead>
+              <tbody>
+                {gaps.map((g) => {
+                  const canReprocess = g.camera_id && g.started_at && g.ended_at
+                  return (
+                    <tr key={g.id} className="border-b border-line/50">
+                      <td className="px-3 py-2">{g.company}</td>
+                      <td className="px-3 py-2 font-medium">{g.camera_name}</td>
+                      <td className="px-3 py-2 text-muted">{g.started_at ? new Date(g.started_at).toLocaleString() : '—'}</td>
+                      <td className="px-3 py-2 text-muted">{g.ended_at ? new Date(g.ended_at).toLocaleString() : <span className="text-bad font-semibold">still down</span>}</td>
+                      <td className="px-3 py-2 tabular-nums">{fmtDur(g.duration_sec)}</td>
+                      <td className={`px-3 py-2 font-semibold ${GAP_UI[g.status] || 'text-muted'}`}>{g.status}</td>
+                      <td className="px-3 py-2">{canReprocess ? <button className="btn py-1 text-xs" onClick={() => reprocess(g)}>⟳ Reprocess</button> : null}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
       </Card>
 
       {/* ── jobs history ── */}
