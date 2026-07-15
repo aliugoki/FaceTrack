@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 from app.core.deps import Principal, require
 from app.modules.companies import service
+from app.modules.pipeline import service as pipeline_service
 from app.modules.audit import service as audit
 
 router = APIRouter(prefix="/api/companies", tags=["companies"])
@@ -52,6 +53,24 @@ async def update_company(cid: str, body: CompanyUpdate, p: Principal = Depends(r
     await service.update_company(cid, body.model_dump(exclude_none=True))
     await audit.record(p.company_id, p.actor, p.role, "company.update", cid)
     return {"status": "ok"}
+
+
+@router.delete("/{cid}")
+async def delete_company(cid: str, p: Principal = Depends(require("manage_tenants"))):
+    if str(cid) == str(p.company_id):
+        raise HTTPException(400, "cannot delete the company you are signed in as")
+    out = await service.delete_company(cid)
+    if not out:
+        raise HTTPException(404, "company not found")
+    await audit.record(p.company_id, p.actor, p.role, "company.delete", f"{cid} ({out['admin_username']})")
+    # Best-effort: stop any running pipeline for the removed tenant (its container
+    # would otherwise keep running and posting to a now-missing company).
+    try:
+        await pipeline_service.enqueue_stop(out["admin_username"], cid)
+    except Exception:
+        pass
+    return {"status": "deleted", "admin_username": out["admin_username"],
+            "image_folder": out["image_folder"]}
 
 
 @router.post("/{cid}/rotate-key")

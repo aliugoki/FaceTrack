@@ -8,7 +8,7 @@ import logging
 
 from databases import Database
 from sqlalchemy import (MetaData, Table, Column, String, Integer, DateTime,
-                        Date, Boolean)
+                        Date, Boolean, Float)
 
 from app.core.config import settings
 
@@ -99,6 +99,24 @@ tenant_settings = Table(
     Column("grace_minutes", Integer, default=0),
     Column("workdays", String, default="1,2,3,4,5"),   # ISO weekday 1=Mon..7=Sun
     Column("timezone", String, default="Asia/Karachi"),
+    # Shift end + optional unpaid break window (HH:MM). break_* NULL = no break.
+    Column("end_time", String, default="18:00"),
+    Column("break_start", String, nullable=True),
+    Column("break_end", String, nullable=True),
+    # Threshold-based status classification (all in minutes).
+    Column("early_leave_grace_minutes", Integer, default=0),
+    Column("half_day_after_minutes", Integer, default=240),
+    Column("min_work_minutes", Integer, default=0),
+    Column("overtime_after_minutes", Integer, default=0),   # 0 = overtime disabled
+    # Recordings retention in days: NULL = MediaMTX default (48h), 0 = keep forever.
+    Column("recordings_retention_days", Integer, nullable=True),
+    # Per-company face-recognition tuning (fed into the pipeline config at launch):
+    #   rec_threshold  cosine match cutoff (higher = stricter, fewer false matches)
+    #   rec_margin     min gap best vs 2nd-best (guards ambiguous look-alikes)
+    #   rec_min_votes  consecutive frames before an identity is committed
+    Column("rec_threshold", Float, default=0.35),
+    Column("rec_margin", Float, default=0.05),
+    Column("rec_min_votes", Integer, default=3),
     Column("updated_at", DateTime, default=datetime.datetime.now),
 )
 
@@ -115,10 +133,11 @@ pipeline_jobs = Table(
     Column("id", Integer, primary_key=True),
     Column("company_id", String, index=True),
     Column("username", String),
-    Column("action", String, default="start"),     # start | stop
+    Column("action", String, default="start"),     # start|stop|restart|mediamtx_sync|backfill
     Column("idx", Integer, default=0),
     Column("status", String, default="pending"),    # pending | running | done | failed
     Column("log", String, nullable=True),
+    Column("payload", String, nullable=True),        # JSON extras (e.g. backfill params)
     Column("created_at", DateTime, default=datetime.datetime.now),
     Column("updated_at", DateTime, default=datetime.datetime.now),
 )
@@ -134,6 +153,32 @@ cameras = Table(
     Column("hls_url", String, nullable=True),        # playback (MediaMTX HLS)
     Column("webrtc_url", String, nullable=True),     # playback (MediaMTX WebRTC)
     Column("enabled", Boolean, default=True),
+    # Detection zone: JSON string of a polygon [[x,y],...] normalized to 0..1.
+    # Attendance only triggers inside it; null/empty = whole frame. Drawn per
+    # camera in the dashboard; consumed by deepstream/tools/gen_company_config.py.
+    Column("detection_area", String, nullable=True),
+    # NVR access for gap backfill (Hikvision ISAPI). When the live stream drops,
+    # the on-site NVR keeps recording; we fetch the missed window from here.
+    Column("nvr_host", String, nullable=True),
+    Column("nvr_port", Integer, nullable=True),      # ISAPI/HTTP port (default 80)
+    Column("nvr_user", String, nullable=True),
+    Column("nvr_password", String, nullable=True),
+    Column("nvr_channel", Integer, nullable=True),   # NVR channel number (1-based)
+    Column("created_at", DateTime, default=datetime.datetime.now),
+)
+
+# Detected live-stream outages per camera. A background monitor opens a row when a
+# source goes stale and closes it (sets ended_at) when frames resume; on close a
+# backfill job is queued to pull + reprocess the missed footage from the NVR.
+stream_gaps = Table(
+    "stream_gaps", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("company_id", String, index=True),
+    Column("camera_id", Integer, nullable=True),
+    Column("camera_name", String, nullable=True),
+    Column("started_at", DateTime, nullable=False),
+    Column("ended_at", DateTime, nullable=True),          # null = still down
+    Column("status", String, default="open"),             # open|queued|done|failed|skipped
     Column("created_at", DateTime, default=datetime.datetime.now),
 )
 
@@ -165,6 +210,23 @@ async def connect_and_init():
         company_id TEXT PRIMARY KEY, start_time TEXT DEFAULT '09:00',
         grace_minutes INTEGER DEFAULT 0, workdays TEXT DEFAULT '1,2,3,4,5',
         timezone TEXT DEFAULT 'Asia/Karachi', updated_at TIMESTAMP DEFAULT now())""")
+    # Additive: enterprise policy fields (shift end, break window, thresholds, retention).
+    # recordings_retention_days stays NULL for existing rows -> generator keeps 48h default.
+    for _col, _type in (
+        ("end_time", "TEXT DEFAULT '18:00'"),
+        ("break_start", "TEXT"),
+        ("break_end", "TEXT"),
+        ("early_leave_grace_minutes", "INTEGER DEFAULT 0"),
+        ("half_day_after_minutes", "INTEGER DEFAULT 240"),
+        ("min_work_minutes", "INTEGER DEFAULT 0"),
+        ("overtime_after_minutes", "INTEGER DEFAULT 0"),
+        ("recordings_retention_days", "INTEGER"),
+        ("rec_threshold", "REAL DEFAULT 0.35"),
+        ("rec_margin", "REAL DEFAULT 0.05"),
+        ("rec_min_votes", "INTEGER DEFAULT 3"),
+    ):
+        await database.execute(
+            f"ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS {_col} {_type}")
     await database.execute("""CREATE TABLE IF NOT EXISTS holidays (
         id SERIAL PRIMARY KEY, company_id TEXT, day DATE NOT NULL, name TEXT)""")
     await database.execute("""CREATE TABLE IF NOT EXISTS pipeline_jobs (
@@ -175,6 +237,19 @@ async def connect_and_init():
         id SERIAL PRIMARY KEY, company_id TEXT, name TEXT NOT NULL, location TEXT,
         type TEXT DEFAULT 'entrance', rtsp_url TEXT, hls_url TEXT, webrtc_url TEXT,
         enabled BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT now())""")
+    # Additive: per-camera detection zone (JSON polygon, normalized 0..1).
+    await database.execute(
+        "ALTER TABLE cameras ADD COLUMN IF NOT EXISTS detection_area TEXT")
+    # Additive: per-camera NVR access (for gap backfill) + the gaps ledger + a
+    # generic job payload (backfill params: camera/channel/time-range).
+    for _c, _t in (("nvr_host", "TEXT"), ("nvr_port", "INTEGER"), ("nvr_user", "TEXT"),
+                   ("nvr_password", "TEXT"), ("nvr_channel", "INTEGER")):
+        await database.execute(f"ALTER TABLE cameras ADD COLUMN IF NOT EXISTS {_c} {_t}")
+    await database.execute("""CREATE TABLE IF NOT EXISTS stream_gaps (
+        id SERIAL PRIMARY KEY, company_id TEXT, camera_id INTEGER, camera_name TEXT,
+        started_at TIMESTAMP NOT NULL, ended_at TIMESTAMP, status TEXT DEFAULT 'open',
+        created_at TIMESTAMP DEFAULT now())""")
+    await database.execute("ALTER TABLE pipeline_jobs ADD COLUMN IF NOT EXISTS payload TEXT")
     await database.execute("""CREATE TABLE IF NOT EXISTS pipeline_agent_state (
         id INTEGER PRIMARY KEY, payload TEXT, updated_at TIMESTAMP DEFAULT now())""")
 

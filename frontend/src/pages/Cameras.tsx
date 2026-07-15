@@ -3,6 +3,7 @@ import { api } from '../lib/api'
 import { Card, toast } from '../components/ui'
 import { useAuth } from '../context/AuthContext'
 import { hlsUrl, webrtcUrl, hasStream } from '../lib/streams'
+import DetectionAreaModal from '../components/DetectionAreaModal'
 
 const BLANK = { name: '', location: '', type: 'entrance', rtsp_url: '', hls_url: '', webrtc_url: '', enabled: true }
 
@@ -13,6 +14,7 @@ export default function Cameras() {
   const [form, setForm] = useState<any>(BLANK)
   const [editId, setEditId] = useState<number | null>(null)
   const [showAdv, setShowAdv] = useState(false)
+  const [areaCam, setAreaCam] = useState<any | null>(null)   // camera whose zone is being drawn
 
   const load = () => api('/api/cameras').then(setList).catch(() => {})
   useEffect(() => { load() }, [])
@@ -65,6 +67,12 @@ export default function Cameras() {
             {showAdv && <>
               <input className="input md:col-span-3" placeholder="HLS URL override (leave blank for auto)" value={form.hls_url || ''} onChange={(e) => setForm({ ...form, hls_url: e.target.value })} />
               <input className="input md:col-span-3" placeholder="WebRTC URL override (leave blank for auto)" value={form.webrtc_url || ''} onChange={(e) => setForm({ ...form, webrtc_url: e.target.value })} />
+              <div className="md:col-span-3 text-xs uppercase tracking-wide text-muted mt-1">NVR (Hikvision) — for gap backfill</div>
+              <input className="input" placeholder="NVR host/IP" value={form.nvr_host || ''} onChange={(e) => setForm({ ...form, nvr_host: e.target.value })} />
+              <input className="input" type="number" placeholder="Port (80)" value={form.nvr_port ?? ''} onChange={(e) => setForm({ ...form, nvr_port: e.target.value === '' ? null : Number(e.target.value) })} />
+              <input className="input" type="number" placeholder="Channel #" value={form.nvr_channel ?? ''} onChange={(e) => setForm({ ...form, nvr_channel: e.target.value === '' ? null : Number(e.target.value) })} />
+              <input className="input" placeholder="NVR username" value={form.nvr_user || ''} onChange={(e) => setForm({ ...form, nvr_user: e.target.value })} />
+              <input className="input" type="password" placeholder="NVR password" value={form.nvr_password || ''} onChange={(e) => setForm({ ...form, nvr_password: e.target.value })} />
             </>}
 
             <div className="md:col-span-3 flex gap-2">
@@ -85,13 +93,14 @@ export default function Cameras() {
                 <td className="px-3.5 py-2.5">{c.type}</td>
                 <td className="px-3.5 py-2.5 text-muted">{(c.hls_url || c.webrtc_url) ? 'Manual' : hasStream(c) ? 'Auto (HLS+WebRTC)' : c.rtsp_url ? 'RTSP only' : '—'}</td>
                 <td className="px-3.5 py-2.5"><span className={`w-2.5 h-2.5 rounded-full inline-block ${c.enabled ? 'bg-ok' : 'bg-line'}`} /></td>
-                <td className="px-3.5 py-2.5">{manage && <span className="flex gap-2"><button className="btn" onClick={() => edit(c)}>Edit</button><button className="btn text-bad" onClick={() => del(c.id)}>Delete</button></span>}</td>
+                <td className="px-3.5 py-2.5">{manage && <span className="flex gap-2"><button className="btn" onClick={() => edit(c)}>Edit</button><button className="btn" title="Draw detection zone" onClick={() => setAreaCam(c)}>Zone{Array.isArray(c.detection_area) && c.detection_area.length >= 3 ? ' ●' : ''}</button><button className="btn text-bad" onClick={() => del(c.id)}>Delete</button></span>}</td>
               </tr>
             ))}
             {!list.length && <tr><td colSpan={6} className="px-3.5 py-4 text-muted">No cameras yet.</td></tr>}
           </tbody>
         </table>
       </Card>
+      {areaCam && <DetectionAreaModal cam={areaCam} onClose={() => setAreaCam(null)} onSaved={() => load()} />}
     </div>
   )
 }

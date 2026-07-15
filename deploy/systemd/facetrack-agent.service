@@ -1,0 +1,36 @@
+# FaceTrack host-side pipeline agent.
+#
+# This is the piece with NO other supervisor — the dashboard runs under Docker
+# (restart: always) and Postgres/nginx are their own units, but the agent is a
+# plain host process. Without this unit a reboot (or a crash) leaves every
+# "Start pipeline" click piling up as a `pending` job that nothing ever drains.
+#
+# install-agent.sh substitutes the __PLACEHOLDERS__ and drops the result at
+# /etc/systemd/system/facetrack-agent.service. Edit there, or re-run the script.
+[Unit]
+Description=FaceTrack pipeline agent (launches DeepStream pipelines for the dashboard)
+Documentation=file:///home/meta/deploy/attendance-system/DEPLOYMENT.md
+# Needs the network up, the Docker daemon (it runs `docker`), and — when the DB
+# is local — Postgres, because the dashboard it polls talks to Postgres.
+After=network-online.target docker.service postgresql.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+# Runs as a normal user that is IN THE docker GROUP (so it can talk to the daemon
+# without sudo) and can reach the GPU for nvidia-smi telemetry.
+User=__USER__
+WorkingDirectory=__DEEPSTREAM_DIR__
+EnvironmentFile=__AGENT_ENV__
+ExecStart=/usr/bin/python3 __DEEPSTREAM_DIR__/tools/pipeline_agent.py
+# Crash-loop protection while still recovering automatically.
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=10
+# journalctl is the source of truth; tag the lines for easy filtering.
+SyslogIdentifier=facetrack-agent
+
+[Install]
+WantedBy=multi-user.target

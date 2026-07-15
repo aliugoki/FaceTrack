@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.core.db import database, companies, user_data
 from app.core.deps import Principal, require
 from app.modules.enrollment import face_engine
+from app.modules.pipeline import service as pipeline_service
 from app.modules.audit import service as audit
 
 router = APIRouter(prefix="/api/employees", tags=["enrollment"])
@@ -74,8 +75,14 @@ async def enroll(body: EnrollIn, p: Principal = Depends(require("manage_employee
             registration_date=datetime.datetime.now()))
         action = "employee.enroll"
     await audit.record(p.company_id, p.actor, p.role, action, f"{emp} {body.first_name} {body.last_name}")
+    # Auto-reload: the pipeline loads the gallery into memory ONCE at startup and
+    # never hot-reloads it, so a freshly enrolled face stays "unknown" until the
+    # pipeline restarts. Queue a restart if it's running (deduped, so enrolling a
+    # batch of people collapses into a single reload). No-op if it's stopped.
+    reload_queued = bool(await pipeline_service.enqueue_restart_on_change(p.company_id))
     return {"status": "ok", "emp_id": emp, "confidence": round(float(conf), 3),
-            "photo": f"/api/images/{p.company_id}/{img_name}"}
+            "photo": f"/api/images/{p.company_id}/{img_name}",
+            "reload_queued": reload_queued}
 
 
 @router.delete("/{emp_id}")
@@ -94,4 +101,7 @@ async def delete_employee(emp_id: str, p: Principal = Depends(require("manage_em
     await database.execute(delete(user_data).where(
         (user_data.c.emp_id == emp_id) & (user_data.c.company_id == p.company_id)))
     await audit.record(p.company_id, p.actor, p.role, "employee.delete", emp_id)
-    return {"status": "deleted"}
+    # Same gallery-is-loaded-once caveat as enroll: restart so the removed face
+    # stops being recognized without waiting for a manual pipeline restart.
+    reload_queued = bool(await pipeline_service.enqueue_restart_on_change(p.company_id))
+    return {"status": "deleted", "reload_queued": reload_queued}

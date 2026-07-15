@@ -111,10 +111,12 @@ async def agent(p: Principal = Depends(require("manage_tenants"))):
 # --------------------------------------------------------------------------- #
 @router.get("/provision")
 async def provision(company: str = Query(..., description="target company admin_username"),
-                    index: int = Query(0, ge=0, le=50),
                     p: Principal = Depends(require("manage_tenants"))):
     row = await _resolve_company(company)
     cid = str(row["company_id"])
+    # Index is assigned by the server (unique per company) — not caller-chosen — so
+    # ports never collide between companies. See service.company_index.
+    index = await service.company_index(row["company_id"])
     cams = await database.fetch_all(
         cameras.select().where((cameras.c.company_id == cid) & (cameras.c.enabled == True)  # noqa: E712
                                & (cameras.c.rtsp_url.isnot(None)) & (cameras.c.rtsp_url != ""))
@@ -139,13 +141,16 @@ async def launch(body: LaunchIn, p: Principal = Depends(require("manage_tenants"
     if body.action not in ACTIONS:
         raise HTTPException(400, f"action must be one of {ACTIONS}")
     row = await _resolve_company(body.company)
+    # Server-assigned unique slot — ignore any caller-supplied index so two
+    # companies can never be launched onto the same ports.
+    idx = await service.company_index(row["company_id"])
     now = datetime.datetime.now()
     jid = await database.execute(pipeline_jobs.insert().values(
         company_id=str(row["company_id"]), username=body.company, action=body.action,
-        idx=body.index, status="pending", created_at=now, updated_at=now))
+        idx=idx, status="pending", created_at=now, updated_at=now))
     await audit.record(p.company_id, p.actor, p.role, f"pipeline.{body.action}",
-                       f"{body.company} index={body.index}")
-    return {"job_id": jid, "status": "pending"}
+                       f"{body.company} index={idx}")
+    return {"job_id": jid, "status": "pending", "index": idx}
 
 
 @router.get("/jobs")
@@ -173,7 +178,8 @@ async def agent_jobs(token: str = ""):
         raise HTTPException(403, "invalid agent token")
     rows = await database.fetch_all(
         pipeline_jobs.select().where(pipeline_jobs.c.status == "pending").order_by(pipeline_jobs.c.id))
-    return [{"id": r["id"], "username": r["username"], "action": r["action"], "index": r["idx"]} for r in rows]
+    return [{"id": r["id"], "username": r["username"], "action": r["action"], "index": r["idx"],
+             "payload": r["payload"]} for r in rows]
 
 
 class AgentUpdate(BaseModel):

@@ -30,27 +30,34 @@ flowchart LR
 
 ---
 
+> **New to the product?** See the **[User Guide](./USER_GUIDE.md)** for every feature and how to use it, plus common workflows.
+
 ## Features
 
 - **Multi-tenant** — every company's data is isolated by `company_id`; one login page, the username resolves the tenant.
 - **RBAC** — `super_admin · admin · manager · viewer`, enforced server-side.
-- **Live attendance feed** — real-time via Socket.IO, with on-time/late status.
-- **Live video wall** — plays each camera's HLS/WebRTC stream (`hls.js`).
-- **Employee directory + attendance card** — per-employee monthly calendar (present / on-time / late).
-- **Reporting engine** — date-range analytics, trends, per-employee %, CSV/print.
+- **Live Attendance board** — kiosk-style real-time confirmation screen: bold per-employee cards with a full-face photo, status and time; a whole group is highlighted as they're marked.
+- **Live attendance feed** — real-time via Socket.IO, with on-time/late/checkout status.
+- **Live video wall** — each camera's HLS/WebRTC stream; grouped by company for super-admins.
+- **Employee directory + enrollment** — per-employee monthly calendar; webcam/photo enrollment (auto-restarts the pipeline to load new faces).
+- **Attendance policy** (per company) — shift start/end, unpaid break, late/early-leave/half-day/min-hours/overtime thresholds, working days, holidays, timezone. Statuses: On&nbsp;Time · Late · Left&nbsp;Early · Half&nbsp;Day · Overtime.
+- **Dynamic recognition tuning** (per company) — match threshold, top-1/top-2 margin, and stability votes, applied to that company's pipeline to balance mismatch vs. missed recognitions.
+- **Recordings + retention** — browse/play MediaMTX recordings; per-company retention enforced natively (auto-delete after N days).
+- **Reporting engine** — date-range analytics, worked hours, per-employee %, export.
 - **ERP integration** — real-time push of each event to the tenant's ERP, with resync.
-- **Company management** (super-admin) — create tenants, rotate API keys, set passwords, suspend.
-- **Camera management** (per company) — CRUD with RTSP source + HLS/WebRTC playback URLs.
-- **Pipeline provisioning** (super-admin) — generate a company's DeepStream config and launch/stop its pipeline container via a host agent (the web app never touches Docker).
+- **Company management** (super-admin) — full CRUD: create, edit, rotate keys, set passwords, suspend, and cascade-delete tenants.
+- **Camera management** (per company) — CRUD with RTSP source, playback URLs, and drawable per-camera detection zones.
+- **Pipeline provisioning** (super-admin) — generate a company's DeepStream config and start/stop its pipeline via a host agent (the web app never touches Docker).
 - **Live snapshots** — proof-of-presence face crop captured at recognition.
-- **Recordings** — browse/play MediaMTX recordings.
 - **Audit log** — logins, user/company/camera/pipeline/settings changes.
-- **Configurable policy** — shift start, grace, working days, holidays.
-- **Self-service password change**, 6 color themes.
+- **Collapsible sidebar**, self-service password change, color themes.
 
 ---
 
 ## Architecture
+
+> For the full **two-repo system architecture** (FaceTrack dashboard + DeepStream
+> GPU pipeline, and how they connect), see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ```
 backend/app/

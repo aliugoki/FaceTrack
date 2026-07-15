@@ -12,6 +12,7 @@ The web app never runs docker. Two signals are combined here:
 """
 import json
 import asyncio
+import datetime
 
 import httpx
 
@@ -84,13 +85,26 @@ async def agent_state() -> dict:
     }
 
 
-async def current_index(username: str) -> int:
-    """A company's working index = its most recent *start* job (default 0)."""
-    row = await database.fetch_one(
-        pipeline_jobs.select()
-        .where((pipeline_jobs.c.username == username) & (pipeline_jobs.c.action != "stop"))
-        .order_by(pipeline_jobs.c.id.desc()).limit(1))
-    return int(row["idx"]) if row and row["idx"] is not None else 0
+async def company_index(company_id) -> int:
+    """Stable, UNIQUE pipeline slot for a company = its 0-based position among all
+    companies ordered by ``company_name`` (the same ordering used elsewhere for
+    per-camera stream paths). Each company therefore maps to distinct ports
+    (RTSP ``8555+idx``, health ``9108+idx``), so the fleet status can't mistake one
+    company's running pipeline for another's. Previously the index defaulted to 0
+    for every company, so non-running tenants all probed comet's :9108 and showed a
+    false "healthy" badge.
+
+    Trade-off: adding/renaming a company can shift positions; a running pipeline
+    then needs a relaunch to land on its new ports. Renames are rare and this keeps
+    the index derivable identically on both the dashboard and the launcher (no
+    extra state)."""
+    rows = await database.fetch_all(
+        companies.select().order_by(companies.c.company_name))
+    cid = str(company_id)
+    for i, r in enumerate(rows):
+        if str(r["company_id"]) == cid:
+            return i
+    return 0
 
 
 def _derive_state(container: dict | None, health: dict, agent_online: bool) -> str:
@@ -113,10 +127,10 @@ async def fleet_status() -> dict:
     agent = await agent_state()
     by_name = {c.get("name"): c for c in agent["containers"]}
 
-    async def one(r):
+    async def one(idx, r):
         user = r["admin_username"]
         cid = str(r["company_id"])
-        idx = await current_index(user)
+        # idx = the company's unique slot (its position in the name-ordered list).
         cam_count = await database.fetch_val(
             "SELECT count(*) FROM cameras WHERE company_id = :cid AND enabled = true "
             "AND rtsp_url IS NOT NULL AND rtsp_url <> ''", {"cid": cid})
@@ -137,7 +151,7 @@ async def fleet_status() -> dict:
             "container": cont,   # {name,state,status,running_for,log} or None
         }
 
-    pipelines = await asyncio.gather(*[one(r) for r in comp_rows])
+    pipelines = await asyncio.gather(*[one(i, r) for i, r in enumerate(comp_rows)])
     running = sum(1 for p in pipelines if p["state"] in ("healthy", "degraded", "starting"))
     cams_live = sum(p["live_sources"] or 0 for p in pipelines)
     return {
@@ -146,3 +160,70 @@ async def fleet_status() -> dict:
                     "cameras_live": cams_live},
         "pipelines": pipelines,
     }
+
+
+async def enqueue_restart_on_change(company_id) -> int | None:
+    """Queue a pipeline RESTART for a company so a config change (e.g. a freshly
+    drawn detection zone) takes effect automatically — but only if its pipeline is
+    currently running (never auto-start a stopped one). Deduped against an already
+    pending/running job. Returns the job id, or None if nothing was queued."""
+    comp = await database.fetch_one(
+        companies.select().where(companies.c.company_id == str(company_id)))
+    if not comp:
+        return None
+    user = comp["admin_username"]
+    idx = await company_index(company_id)
+    # Running? Live health port first; fall back to the agent's container list.
+    running = (await fetch_health(idx)).get("available")
+    if not running:
+        agent = await agent_state()
+        cont = next((c for c in agent.get("containers", [])
+                     if c.get("name") == f"deepstream-{user}"), None)
+        running = bool(cont and cont.get("state") == "running")
+    if not running:
+        return None
+    # Dedupe: don't pile up restarts if one is already queued/running.
+    existing = await database.fetch_one(
+        pipeline_jobs.select().where(
+            (pipeline_jobs.c.username == user)
+            & (pipeline_jobs.c.action != "stop")
+            & (pipeline_jobs.c.status.in_(["pending", "running"])))
+        .order_by(pipeline_jobs.c.id.desc()))
+    if existing:
+        return existing["id"]
+    now = datetime.datetime.now()
+    return await database.execute(pipeline_jobs.insert().values(
+        company_id=str(company_id), username=user, action="restart",
+        idx=idx, status="pending", created_at=now, updated_at=now))
+
+
+async def enqueue_stop(username, company_id="") -> int:
+    """Queue a stop job for a company's pipeline (e.g. when a tenant is deleted).
+    Keyed by username, which is all the agent needs to `docker rm -f` the container."""
+    now = datetime.datetime.now()
+    return await database.execute(pipeline_jobs.insert().values(
+        company_id=str(company_id), username=username, action="stop",
+        idx=0, status="pending", created_at=now, updated_at=now))
+
+
+async def enqueue_mediamtx_sync(company_id) -> int | None:
+    """Queue a MediaMTX config sync so a recordings-retention change takes effect:
+    the agent regenerates the paths block (per-company ``recordDeleteAfter`` from the
+    DB) and MediaMTX hot-reloads — no pipeline restart, no feed interruption. The sync
+    is global (rewrites every path), so it dedupes against ANY pending/running sync,
+    not per-company. Returns the job id, or None if the company is unknown."""
+    comp = await database.fetch_one(
+        companies.select().where(companies.c.company_id == str(company_id)))
+    if not comp:
+        return None
+    existing = await database.fetch_one(
+        pipeline_jobs.select().where(
+            (pipeline_jobs.c.action == "mediamtx_sync")
+            & (pipeline_jobs.c.status.in_(["pending", "running"])))
+        .order_by(pipeline_jobs.c.id.desc()))
+    if existing:
+        return existing["id"]
+    now = datetime.datetime.now()
+    return await database.execute(pipeline_jobs.insert().values(
+        company_id=str(company_id), username=comp["admin_username"], action="mediamtx_sync",
+        idx=0, status="pending", created_at=now, updated_at=now))

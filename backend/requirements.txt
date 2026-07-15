@@ -9,5 +9,8 @@ python-dotenv
 werkzeug
 pydantic
 numpy
-opencv-python-headless
+# Pin below 5.0: OpenCV 5.x removed cv2.dnn.readNetFromCaffe (used by the res10
+# enrollment detector) and carries other breaking changes the app isn't validated
+# on. Leaving this unpinned let a rebuild drift to 5.0 and 500'd every enrollment.
+opencv-python-headless<5
 onnxruntime

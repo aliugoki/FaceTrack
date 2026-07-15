@@ -34,6 +34,11 @@ log = logging.getLogger("main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await connect_and_init()
+    try:
+        from app.modules.pipeline.gaps import start_monitor
+        await start_monitor()          # detect live-stream gaps -> queue NVR backfill
+    except Exception as e:
+        log.warning("gap monitor not started: %s", e)
     log.info("Attendance API ready")
     yield
     await disconnect()
