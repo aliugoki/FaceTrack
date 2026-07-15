@@ -1,4 +1,5 @@
 fastapi
+python-multipart  # required by FastAPI for UploadFile/Form (video backfill upload)
 uvicorn[standard]
 gunicorn
 databases[postgresql]
