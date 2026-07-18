@@ -1,4 +1,5 @@
 """Attendance HTTP routes."""
+import datetime
 import logging
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -24,6 +25,11 @@ class EntryIn(BaseModel):
     check_type: str = "in"
     image_url: str | None = None
     image_b64: str | None = None   # live face snapshot (proof-of-presence)
+    # Event time from the pipeline. Live posts omit these (→ ingestion time); a
+    # BACKFILL/offline reprocess sends the true recording time so attendance_logs
+    # lands on the real day, not "today". Both must be present to take effect.
+    attendance_date: datetime.date | None = None
+    attendance_time: datetime.time | None = None
 
 
 async def _company_from_auth(authorization: str | None) -> str:
@@ -47,7 +53,8 @@ async def create_entry(payload: EntryIn, authorization: str | None = Header(defa
     company_id = await _company_from_auth(authorization)
     row = await service.add_entry(company_id, payload.emp_id, payload.first_name,
                                   payload.last_name, payload.check_type, payload.image_url,
-                                  payload.image_b64)
+                                  payload.image_b64, payload.attendance_date,
+                                  payload.attendance_time)
     if not row:
         return {"status": "skipped"}
     client_entry = service.prepare_entry(row, company_id)

@@ -99,14 +99,24 @@ async def clear(company_id: str):
 
 async def add_entry(company_id: str, emp_id: str, first_name: str, last_name: str,
                     check_type: str, image_url: str | None = None,
-                    image_b64: str | None = None) -> dict | None:
+                    image_b64: str | None = None,
+                    event_date: datetime.date | None = None,
+                    event_time: datetime.time | None = None) -> dict | None:
     """Insert an in/out event (idempotent for same-day check-in).
 
     If `image_b64` (a live face snapshot from the pipeline) is provided it is
     stored as proof-of-presence and used as the record image; otherwise we fall
     back to the enrolled gallery photo basename.
+
+    `event_date`/`event_time`, when both given, are the true event time (a
+    BACKFILL/offline reprocess sends the recording time); attendance is then
+    stamped, deduped, and classified against that instant instead of ingestion
+    wall-clock, so reprocessed footage lands on the real day. Live posts omit
+    them and behave exactly as before.
     """
     now = datetime.datetime.now()
+    if event_date is not None and event_time is not None:
+        now = datetime.datetime.combine(event_date, event_time)
     if image_b64:
         img = save_capture(company_id, str(emp_id), image_b64) or (
             os.path.basename(urlparse(image_url).path) if image_url else None)
@@ -115,9 +125,12 @@ async def add_entry(company_id: str, emp_id: str, first_name: str, last_name: st
     ct = (check_type or "in").lower()
 
     if ct == "in":
+        # Idempotent per DAY: one check-in per employee per day. Equal-to (not >=)
+        # so a backfilled event on an older day dedups against THAT day, not every
+        # later day; identical to the old behaviour for live (never a future date).
         dup = await database.fetch_one(select(attendance.c.id).where(
             (attendance.c.company_id == company_id) & (attendance.c.check_type == "in")
-            & (attendance.c.attendance_date >= now.date()) & (attendance.c.emp_id == str(emp_id))))
+            & (attendance.c.attendance_date == now.date()) & (attendance.c.emp_id == str(emp_id))))
         if dup:
             return None
         # On-time cutoff = tenant policy start_time + grace (configurable in Settings)
