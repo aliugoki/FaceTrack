@@ -17,6 +17,7 @@ import LiveBoard from './pages/LiveBoard'
 import Cameras from './pages/Cameras'
 import Companies from './pages/Companies'
 import Recordings from './pages/Recordings'
+import NvrFootage from './pages/NvrFootage'
 import Pipeline from './pages/Pipeline'
 import { ReactNode } from 'react'
 
@@ -38,6 +39,7 @@ export default function App() {
           <Route path="live" element={<Live />} />
           <Route path="cameras" element={<Cameras />} />
           <Route path="recordings" element={<Recordings />} />
+          <Route path="nvr" element={<NvrFootage />} />
           <Route path="pipeline" element={<Pipeline />} />
           <Route path="companies" element={<Companies />} />
           <Route path="attendance" element={<Attendance />} />

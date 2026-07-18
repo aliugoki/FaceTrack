@@ -14,6 +14,7 @@ const NAV = [
   { to: '/employees', label: 'Employees', icon: '☻' },
   { to: '/cameras', label: 'Cameras', icon: '▣' },
   { to: '/recordings', label: 'Recordings', icon: '⏺', perm: 'manage_cameras' },
+  { to: '/nvr', label: 'NVR Footage', icon: '⧉', perm: 'manage_tenants' },
   { to: '/pipeline', label: 'Pipeline', icon: '⛓', perm: 'manage_tenants' },
   { to: '/reports', label: 'Reports', icon: '▤' },
   { to: '/erp', label: 'ERP Sync', icon: '⇄' },

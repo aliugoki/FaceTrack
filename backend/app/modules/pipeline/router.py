@@ -6,10 +6,12 @@ owns the data for, (b) reads live health straight off each pipeline's /healthz
 token-holding host agent executes and reports back on (plus a GPU/container
 heartbeat). See service.py for the status/health logic.
 """
+import asyncio
 import datetime
 import json
 import os
 import re
+import shutil
 import uuid
 
 from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File, Form
@@ -21,6 +23,7 @@ from app.core.db import database, cameras, companies, pipeline_jobs, stream_gaps
 from app.core.deps import Principal, require
 from app.modules.audit import service as audit
 from app.modules.pipeline import service
+from app.modules.pipeline import nvr
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
@@ -281,6 +284,30 @@ _ALLOWED_EXT = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".ts", ".h264"}
 _MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
 
 
+async def _queue_clip_reprocess(company_row, fname, label, clip_start, camera_id, size=None):
+    """Insert the gap + job rows for a clip sitting in backfill_uploads.
+
+    Shared by the file-upload and the reprocess-a-recording flows so both emit the
+    IDENTICAL job payload the host agent already knows how to run
+    (run_backfill_file.sh): file source, live-source=0, attendance stamped from
+    clip_start. Returns (job_id, gap_id).
+    """
+    cid = str(company_row["company_id"])
+    now = datetime.datetime.now()
+    gap_id = await database.execute(stream_gaps.insert().values(
+        company_id=cid, camera_id=camera_id, camera_name=f"upload:{label}",
+        started_at=clip_start, ended_at=None, status="queued", created_at=now))
+    payload = json.dumps({
+        "gap_id": gap_id, "upload": True, "filename": fname,
+        "clip_start": clip_start.isoformat(), "camera_id": camera_id, "manual": True,
+    })
+    jid = await database.execute(pipeline_jobs.insert().values(
+        company_id=cid, username=company_row["admin_username"], action="backfill",
+        idx=await service.company_index(company_row["company_id"]),
+        status="pending", payload=payload, created_at=now, updated_at=now))
+    return jid, gap_id
+
+
 @router.post("/backfill/upload")
 async def backfill_upload(
     file: UploadFile = File(...),
@@ -311,22 +338,117 @@ async def backfill_upload(
         if os.path.exists(dest):
             os.remove(dest)
         raise
-    cid = str(row["company_id"])
-    now = datetime.datetime.now()
-    gap_id = await database.execute(stream_gaps.insert().values(
-        company_id=cid, camera_id=camera_id, camera_name=f"upload:{safe}",
-        started_at=clip_start, ended_at=None, status="queued", created_at=now))
-    payload = json.dumps({
-        "gap_id": gap_id, "upload": True, "filename": fname,
-        "clip_start": clip_start.isoformat(), "camera_id": camera_id, "manual": True,
-    })
-    jid = await database.execute(pipeline_jobs.insert().values(
-        company_id=cid, username=company, action="backfill",
-        idx=await service.company_index(row["company_id"]),
-        status="pending", payload=payload, created_at=now, updated_at=now))
+    jid, gap_id = await _queue_clip_reprocess(row, fname, safe, clip_start, camera_id, size)
     await audit.record(p.company_id, p.actor, p.role, "pipeline.backfill_upload",
                        f"{company} {safe} ({size}B) clip_start={clip_start.isoformat()}")
     return {"job_id": jid, "gap_id": gap_id, "status": "pending", "filename": fname, "bytes": size}
+
+
+class ReprocessRecordingIn(BaseModel):
+    path: str                       # recording path relative to RECORDINGS_DIR
+    company: str                    # target company admin_username
+    clip_start: datetime.datetime   # real-world time the footage begins
+    camera_id: int | None = None
+
+
+@router.post("/backfill/recording")
+async def backfill_recording(body: ReprocessRecordingIn,
+                             p: Principal = Depends(require("manage_tenants"))):
+    """Run inference on an existing MediaMTX recording — no re-upload.
+
+    RECORDINGS_DIR is mounted read-only, so we copy the (path-safe) recording into
+    backfill_uploads (which the host agent already mounts) and queue it exactly
+    like an uploaded clip. Attendance is stamped from clip_start.
+    """
+    row = await _resolve_company(body.company)
+    # Path-safety: resolve within RECORDINGS_DIR (mirrors main.recording_file).
+    base = os.path.realpath(settings.RECORDINGS_DIR)
+    src = os.path.realpath(os.path.join(base, body.path))
+    if not src.startswith(base + os.sep) or not os.path.isfile(src):
+        raise HTTPException(404, "recording not found")
+    ext = os.path.splitext(src)[1].lower()
+    if ext not in _ALLOWED_EXT:
+        raise HTTPException(400, f"unsupported type '{ext}' (allowed: {sorted(_ALLOWED_EXT)})")
+    up_dir = os.path.join(settings.CAPTURES_DIR, UPLOAD_SUBDIR)
+    os.makedirs(up_dir, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(src))
+    fname = f"{uuid.uuid4().hex}_{safe}"
+    dest = os.path.join(up_dir, fname)
+    try:
+        # Off-thread: recordings can be large; don't block the event loop.
+        await asyncio.to_thread(shutil.copyfile, src, dest)
+    except OSError as e:
+        if os.path.exists(dest):
+            os.remove(dest)
+        raise HTTPException(500, f"could not stage recording: {e}")
+    jid, gap_id = await _queue_clip_reprocess(row, fname, safe, body.clip_start, body.camera_id)
+    await audit.record(p.company_id, p.actor, p.role, "pipeline.backfill_recording",
+                       f"{body.company} {body.path} clip_start={body.clip_start.isoformat()}")
+    return {"job_id": jid, "gap_id": gap_id, "status": "pending", "filename": fname}
+
+
+# --------------------------------------------------------------------------- #
+# NVR footage — browse recorded segments + on-demand RTSP->HLS playback proxy
+# (super-admin). Search hits the camera's ISAPI; playback registers an on-demand
+# MediaMTX path so the recorded window can be watched in the browser. "Send to
+# inference" reuses POST /backfill above for the chosen window.
+# --------------------------------------------------------------------------- #
+async def _nvr_camera(camera_id: int):
+    cam = await database.fetch_one(cameras.select().where(cameras.c.id == camera_id))
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    if not nvr.has_nvr(cam):
+        raise HTTPException(400, "camera has no NVR configured")
+    return cam
+
+
+@router.get("/nvr/recordings")
+async def nvr_recordings(camera_id: int = Query(...),
+                         start: datetime.datetime = Query(...),
+                         end: datetime.datetime = Query(...),
+                         p: Principal = Depends(require("manage_tenants"))):
+    """Recorded segments the NVR holds for a camera + window (via ISAPI search)."""
+    if end <= start:
+        raise HTTPException(400, "end must be after start")
+    cam = await _nvr_camera(camera_id)
+    try:
+        segments = await nvr.search_recordings(cam, start, end)
+        return {"searched": True, "segments": segments}
+    except Exception as e:
+        # Search is device/firmware-specific — surface the error but still let the
+        # UI play / send-to-inference the raw requested window.
+        return {"searched": False, "error": str(e), "segments": []}
+
+
+class NvrPlayIn(BaseModel):
+    camera_id: int
+    start: datetime.datetime
+    end: datetime.datetime
+
+
+@router.post("/nvr/play")
+async def nvr_play(body: NvrPlayIn, p: Principal = Depends(require("manage_tenants"))):
+    """Register an on-demand MediaMTX path for a recorded window; returns its name.
+
+    The browser plays it as HLS (``/{path}/index.m3u8`` on the HLS gateway).
+    """
+    if body.end <= body.start:
+        raise HTTPException(400, "end must be after start")
+    if (body.end - body.start).total_seconds() > 6 * 3600:
+        raise HTTPException(400, "playback window too large (max 6h)")
+    cam = await _nvr_camera(body.camera_id)
+    try:
+        name = await nvr.ensure_play_path(cam, body.start, body.end)
+    except Exception as e:
+        raise HTTPException(502, f"could not start NVR playback: {e}")
+    return {"path": name}
+
+
+@router.delete("/nvr/play/{name}")
+async def nvr_play_stop(name: str, p: Principal = Depends(require("manage_tenants"))):
+    """Tear down a playback path when the viewer is done (idle-close backs this up)."""
+    await nvr.remove_play_path(name)
+    return {"status": "ok"}
 
 
 # --------------------------------------------------------------------------- #
