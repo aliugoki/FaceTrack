@@ -44,6 +44,13 @@ class Settings:
     # Shared secret for the host-side pipeline agent (empty = agent disabled)
     AGENT_TOKEN: str = os.getenv("AGENT_TOKEN", "")
 
+    # MediaMTX control API (same host, host-networked) — used to spin up on-demand
+    # RTSP->HLS proxy paths for browsing recorded NVR footage in the browser.
+    MEDIAMTX_API_URL: str = os.getenv("MEDIAMTX_API_URL", "http://127.0.0.1:9997")
+    # RTSP port on the NVR for playback pulls (Hikvision default 554). ISAPI/HTTP
+    # search uses each camera's nvr_port (default 80) instead.
+    NVR_RTSP_PORT: int = int(os.getenv("NVR_RTSP_PORT", "554"))
+
     # Face models for in-dashboard employee enrollment (res10 detector + ArcFace)
     MODELS_DIR: str = os.getenv("MODELS_DIR", "/app/models")
 
